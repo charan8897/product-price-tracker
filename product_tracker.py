@@ -178,6 +178,37 @@ def export_csv(filepath: str):
     print(f"✅ Exported {len(rows)} rows to {filepath}")
 
 
+def delete_product(url: str = None, product_id: int = None) -> int:
+    """Delete product(s) by URL or ID. Returns count of deleted rows."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if product_id:
+        cur.execute("DELETE FROM products WHERE id = %s;", (product_id,))
+    elif url:
+        cur.execute("DELETE FROM products WHERE url = %s;", (url,))
+    else:
+        cur.close()
+        conn.close()
+        return 0
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return deleted
+
+
+def delete_all_products() -> int:
+    """Delete all products. Returns count of deleted rows."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM products;")
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return deleted
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SCRAPE + SAVE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -296,6 +327,9 @@ Examples:
     parser.add_argument("--search", type=str, help="Search products by name")
     parser.add_argument("--history", type=str, help="Show price history for a URL")
     parser.add_argument("--export", type=str, help="Export to CSV file")
+    parser.add_argument("--delete", type=str, help="Delete all records for a URL")
+    parser.add_argument("--delete-id", type=int, help="Delete a record by ID")
+    parser.add_argument("--delete-all", action="store_true", help="Delete ALL records")
     args = parser.parse_args()
 
     # Init DB
@@ -322,6 +356,22 @@ Examples:
     # Export mode
     if args.export:
         export_csv(args.export)
+        return
+
+    # Delete modes
+    if args.delete:
+        deleted = delete_product(url=args.deleted)
+        print(f"\n  🗑️  Deleted {deleted} record(s) for: {args.delete}\n")
+        return
+
+    if args.delete_id:
+        deleted = delete_product(product_id=args.delete_id)
+        print(f"\n  🗑️  Deleted {deleted} record(s) with ID: {args.delete_id}\n")
+        return
+
+    if args.delete_all:
+        deleted = delete_all_products()
+        print(f"\n  🗑️  Deleted ALL {deleted} record(s)\n")
         return
 
     # Scrape mode

@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash
 
-from product_tracker import init_db, get_conn, scrape_and_save
+from product_tracker import init_db, get_conn, scrape_and_save, delete_product, delete_all_products
 from price_stats import get_price_stats, get_all_price_stats, get_price_history, get_latest_change
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -174,6 +174,30 @@ def refresh_all():
     return redirect(url_for("index"))
 
 
+@app.route("/delete/<path:url>", methods=["POST"])
+def delete_by_url(url):
+    """Delete all records for a URL."""
+    deleted = delete_product(url=url)
+    flash(f"Deleted {deleted} record(s)", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/delete-id/<int:product_id>", methods=["POST"])
+def delete_by_id(product_id):
+    """Delete a single record by ID."""
+    deleted = delete_product(product_id=product_id)
+    flash(f"Deleted record #{product_id}", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/delete-all", methods=["POST"])
+def delete_all():
+    """Delete ALL records."""
+    deleted = delete_all_products()
+    flash(f"Deleted ALL {deleted} record(s)", "success")
+    return redirect(url_for("index"))
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # TEMPLATES
 # ──────────────────────────────────────────────────────────────────────────────
@@ -260,6 +284,9 @@ INDEX_HTML = """
     </div>
     <div style="display:flex;gap:10px;">
       <form method="POST" action="/refresh"><button class="btn btn-secondary">🔄 Refresh All</button></form>
+      <form method="POST" action="/delete-all" onsubmit="return confirm('Delete ALL tracked products?')">
+        <button class="btn" style="background:#7f1d1d;color:#fca5a5;">🗑️ Delete All</button>
+      </form>
     </div>
   </div>
 
@@ -316,8 +343,11 @@ INDEX_HTML = """
           <span class="stat-value">{{ s.get('num_readings', 0) }}</span>
         </div>
       </div>
-      <div style="margin-top:12px;font-size:12px;color:#475569;">
-        {{ p.domain }} · {{ p.scraped_at.strftime('%b %d, %H:%M') if p.scraped_at else '—' }}
+      <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;color:#475569;">{{ p.domain }} · {{ p.scraped_at.strftime('%b %d, %H:%M') if p.scraped_at else '—' }}</span>
+        <form method="POST" action="/delete/{{ p.url }}" onsubmit="return confirm('Delete this product?')">
+          <button class="btn" style="background:#7f1d1d;color:#fca5a5;padding:4px 10px;font-size:11px;">🗑️ Delete</button>
+        </form>
       </div>
     </div>
     {% endfor %}
