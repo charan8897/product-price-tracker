@@ -577,17 +577,11 @@ def _myntra_api_fallback(url: str, verbose: bool = False) -> dict | None:
 
 
 def _ajio_fallback(url: str, verbose: bool = False) -> dict | None:
-    """Extract product info from the resolved AJIO URL path."""
-    # AJIO blocks all server-side requests via Akamai.
-    # As a best-effort, parse the URL slug for product name.
+    """Extract product info from AJIO URL slug."""
     m = re.search(r'ajio\.com/([^/]+)/p/\d+', url)
     if m:
         slug = m.group(1).replace("-", " ").title()
-        pid_m = re.search(r'/p/(\d+)', url)
-        result = {"name": slug, "price": None, "currency": "INR", "source": "ajio-url-slug"}
-        if verbose:
-            print(f"[*] Extracted from AJIO URL slug: {slug}")
-        return result
+        return {"name": slug, "price": None, "currency": "INR", "source": "ajio-url-slug"}
     return None
 
 
