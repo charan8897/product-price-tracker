@@ -68,27 +68,31 @@ def get_conn():
 
 def init_db():
     """Create the products table if it doesn't exist."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id          SERIAL PRIMARY KEY,
-            url         TEXT NOT NULL,
-            domain      TEXT,
-            product_name TEXT,
-            price       NUMERIC(12,2),
-            currency    TEXT DEFAULT 'INR',
-            source      TEXT,
-            scraped_at  TIMESTAMP DEFAULT NOW()
-        );
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                id          SERIAL PRIMARY KEY,
+                url         TEXT NOT NULL,
+                domain      TEXT,
+                product_name TEXT,
+                price       NUMERIC(12,2),
+                currency    TEXT DEFAULT 'INR',
+                source      TEXT,
+                scraped_at  TIMESTAMP DEFAULT NOW()
+            );
 
-        CREATE INDEX IF NOT EXISTS idx_products_url ON products(url);
-        CREATE INDEX IF NOT EXISTS idx_products_name ON products(product_name);
-        CREATE INDEX IF NOT EXISTS idx_products_scraped ON products(scraped_at DESC);
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+            CREATE INDEX IF NOT EXISTS idx_products_url ON products(url);
+            CREATE INDEX IF NOT EXISTS idx_products_name ON products(product_name);
+            CREATE INDEX IF NOT EXISTS idx_products_scraped ON products(scraped_at DESC);
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database initialized (products table ready)")
+    except Exception as e:
+        print(f"⚠️  init_db error: {e}")
 
 
 def save_product(url: str, product_name: str, price, currency: str = "INR",
