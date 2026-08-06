@@ -31,11 +31,12 @@ if DATABASE_URL:
     url = urllib.parse.urlparse(DATABASE_URL)
     DB_CONFIG = {
         "host": url.hostname,
-        "port": url.port or 5432,
+        "port": int(url.port or 5432),
         "dbname": url.path[1:],
         "user": url.username,
         "password": url.password,
     }
+    print(f"📦 DB Config from DATABASE_URL: host={DB_CONFIG['host']}, port={DB_CONFIG['port']}, db={DB_CONFIG['dbname']}")
 else:
     DB_CONFIG = {
         "host": os.environ.get("DB_HOST", "localhost"),

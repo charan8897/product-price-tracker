@@ -28,6 +28,20 @@ app = Flask(__name__)
 app.secret_key = "product-tracker-secret-key"
 app.jinja_env.globals.update(float=float)
 
+# Auto-create table on first request
+_db_initialized = False
+
+@app.before_request
+def ensure_db():
+    global _db_initialized
+    if not _db_initialized:
+        try:
+            init_db()
+            _db_initialized = True
+            print("✅ DB table ensured on first request")
+        except Exception as e:
+            print(f"⚠️ DB init error: {e}")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HELPERS
