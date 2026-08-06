@@ -1,0 +1,9 @@
+# Python dependencies
+psycopg2-binary>=2.9
+curl_cffi>=0.16
+cloudscraper>=1.2
+lxml>=5.0
+apscheduler>=3.10
+beautifulsoup4>=4.12
+requests>=2.31
+matplotlib>=3.8

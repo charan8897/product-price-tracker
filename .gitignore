@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+.cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Generated files
+price_graphs/
+products.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+.sudo_as_admin_successful
+
+# Env/secrets
+.env
+.netrc
