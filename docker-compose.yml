@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: changeme123
+      POSTGRES_DB: myapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d myapp"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: myapp
+      DB_USER: myuser
+      DB_PASS: changeme123
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python3 app.py --host 0.0.0.0 --port 5000
+
+  scheduler:
+    build: .
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: myapp
+      DB_USER: myuser
+      DB_PASS: changeme123
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python3 scheduler.py
+
+volumes:
+  pgdata:

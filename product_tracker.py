@@ -16,17 +16,19 @@ Usage:
 
 import argparse
 import json
-import sys
 import os
+import sys
+import time
+import random
 from datetime import datetime
 
 # ─── DB Config ───
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "myapp",
-    "user": "myuser",
-    "password": "changeme123",
+    "host": os.environ.get("DB_HOST", "localhost"),
+    "port": int(os.environ.get("DB_PORT", 5432)),
+    "dbname": os.environ.get("DB_NAME", "myapp"),
+    "user": os.environ.get("DB_USER", "myuser"),
+    "password": os.environ.get("DB_PASS", "changeme123"),
 }
 
 # Import the scraper we built earlier
