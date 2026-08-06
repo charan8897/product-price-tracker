@@ -1,0 +1,36 @@
+services:
+  # PostgreSQL Database
+  - type: pserv
+    name: product-tracker-db
+    plan: free
+    databaseName: myapp
+    user: myuser
+
+  # Web Dashboard
+  - type: web
+    name: product-tracker
+    plan: free
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 app.py --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DB_HOST
+        fromDatabase:
+          name: product-tracker-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: product-tracker-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: product-tracker-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: product-tracker-db
+          property: user
+      - key: DB_PASS
+        fromDatabase:
+          name: product-tracker-db
+          property: password
