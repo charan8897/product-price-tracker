@@ -825,6 +825,55 @@ def _ajio_fallback(url: str, verbose: bool = False) -> dict | None:
     return None
 
 
+def _ajio_api_fallback(url: str, verbose: bool = False) -> dict | None:
+    """AJIO's price is JS-rendered and absent from the raw HTML.
+
+    Fetch the product's internal API JSON instead:
+        GET https://www.ajio.com/api/p/{code}
+    returns {'name':..., 'price':{'formattedValue': 'Rs. 1,299', ...}, ...}
+    The product code is the trailing path element (e.g. '443627735_brown').
+    """
+    code = None
+    m = re.search(r"/p/([^/?#]+)", url)
+    if m:
+        code = m.group(1)
+    if not code:
+        return None
+    if verbose:
+        print(f"[*] Trying AJIO API for product {code}...")
+    api_url = f"https://www.ajio.com/api/p/{code}"
+    try:
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get(
+            api_url, headers=_random_headers(), impersonate="chrome131",
+            timeout=20,
+        )
+        if resp.status_code != 200 or resp.text.strip().startswith("<"):
+            if verbose:
+                print(f"  [-] AJIO API {api_url} -> HTTP {resp.status_code} (HTML/error)")
+            return None
+        data = resp.json()
+        name = data.get("name")
+        price = None
+        price_obj = data.get("price")
+        if isinstance(price_obj, dict):
+            # formattedValue e.g. "Rs. 1,299" or "₹1,299"
+            fv = price_obj.get("formattedValue") or price_obj.get("value")
+            if isinstance(fv, str):
+                m2 = re.search(r"([\d,]+(?:\.\d+)?)", fv)
+                if m2:
+                    price = m2.group(1).replace(",", "")
+            elif isinstance(fv, (int, float)):
+                price = str(fv)
+        if name or price:
+            return {"name": name, "price": price, "currency": "INR",
+                    "source": "ajio-api"}
+    except Exception as e:
+        if verbose:
+            print(f"  [-] AJIO API failed: {e}")
+    return None
+
+
 def _amazon_web_search_fallback(url: str, verbose: bool = False) -> dict | None:
     """Last resort: use Google search to find Amazon product name & price."""
     asin_m = re.search(r'(?:dp|aw/d)/([A-Z0-9]{10})', url)
@@ -908,6 +957,18 @@ def scrape(url: str, verbose: bool = False) -> dict:
             fb = _myntra_api_fallback(resolved_url, verbose=verbose)
             if fb and fb.get("name"):
                 info = fb
+
+        if ("ajio" in domain) and (not info or not info.get("price")):
+            # Price is JS-rendered, so hit AJIO's internal product API
+            fb = _ajio_api_fallback(resolved_url, verbose=verbose)
+            if fb:
+                # Prefer the API's name if we only had a title fallback
+                if not info.get("name") and fb.get("name"):
+                    info["name"] = fb["name"]
+                if not info.get("price") and fb.get("price"):
+                    info["price"] = fb["price"]
+                    info["currency"] = fb.get("currency", info.get("currency", "INR"))
+                    info["source"] = fb["source"]
 
         if ("ajio" in domain) and (not info or not info.get("name")):
             fb = _ajio_fallback(resolved_url, verbose=verbose)

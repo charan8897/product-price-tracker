@@ -24,6 +24,7 @@ from scraper import (
     extract_product_info,
     resolve_deep_link,
     _strip_tracking_params,
+    _ajio_api_fallback,
 )
 
 
@@ -165,6 +166,35 @@ class TestURLCleaning(unittest.TestCase):
         self.assertEqual(
             _strip_tracking_params("https://www.amazon.in/dp/B0CFXYZABC"),
             "https://www.amazon.in/dp/B0CFXYZABC")
+
+
+
+class TestAJIOAPIFallback(unittest.TestCase):
+    def test_api_backfills_price(self):
+        import sys, types, json
+        API = "https://www.ajio.com/api/p/443627735_brown"
+        class FakeResp:
+            def __init__(self, payload):
+                self.status_code = 200
+                self.text = json.dumps(payload)
+                self._p = payload
+            def json(self):
+                return self._p
+        def fake_get(url, **kw):
+            if url == API:
+                return FakeResp({
+                    "name": "The Indian Garage Co Men Regular Fit Printed Winter Jacket",
+                    "price": {"formattedValue": "Rs. 1,299", "value": 1299},
+                })
+            return FakeResp({})
+        pkg = types.ModuleType("curl_cffi"); req = types.ModuleType("curl_cffi.requests")
+        req.get = fake_get
+        sys.modules["curl_cffi"] = pkg; sys.modules["curl_cffi.requests"] = req
+
+        r = _ajio_api_fallback("https://www.ajio.com/x/p/443627735_brown")
+        self.assertEqual(r["price"], "1299")
+        self.assertEqual(r["name"], "The Indian Garage Co Men Regular Fit Printed Winter Jacket")
+        self.assertEqual(r["source"], "ajio-api")
 
 
 if __name__ == "__main__":

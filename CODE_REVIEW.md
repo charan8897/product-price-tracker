@@ -196,3 +196,28 @@ You showed a live `curl` to your Render app: an AJIO product was saved with the 
 1. **Redeploy** the Render app from `arena/019fda90-product-price-tracker` (or `main` once merged) — the old deployed build is why nothing changed.
 2. Delete the existing `..._brown?` row from the dashboard and re-add the clean URL so the price tracks properly.
 3. If AJIO still returns price `None` after redeploy, run the AJIO URL with `--verbose` and share the output — it would then be a fetch/bot-block (Akamai) rather than a parser issue.
+
+---
+
+## 🔍 Follow-up 4: AJIO price still ₹None after redeploy
+
+Your latest curl shows the **name now saves correctly** ("The Indian Garage Co Men Regular Fit Printed Winter Jacket" — confirming the redeployed app has the newer `_extract_ajio` name logic), but **price is still `₹None`**.
+
+### Root cause (confirmed)
+AJIO does **not** put the price in the raw HTML at all — it's rendered client-side from an XHR call to AJIO's internal product API. So no amount of DOM/`₹`-regex/embedded-JSON parsing of the HTML can find it. (My earlier embedded-JSON parse of `__PRELOADED_STATE__`/`__NEXT_DATA__` didn't match AJIO's current payload.)
+
+### Fix (committed + pushed)
+Added **`_ajio_api_fallback`**: when the AJIO HTML yields a name but no price, the scraper now calls AJIO's internal product endpoint directly —
+```
+GET https://www.ajio.com/api/p/{product_code}
+# product_code = last path segment, e.g. 443627735_brown
+# -> {"name": ..., "price": {"formattedValue": "Rs. 1,299", ...}}
+```
+and backfills the price (parsing `formattedValue`). The endpoint structure was confirmed from a public AJIO scraper (`Kwanzoe/Ajio-Speed-Scraper`): the product-detail API returns `item['name']` and `item['price']['formattedValue']`.
+
+Verified offline with a mocked API response: name "The Indian Garage Co Men Regular Fit Printed Winter Jacket" + **price ₹1299**, URL cleaned to `.../443627735_brown`.
+
+`test_scraper.py` is now **14 passing offline tests**.
+
+### Action needed
+Redeploy the app again and re-test the AJIO URL. If `www.ajio.com/api/p/...` itself is blocked by Akamai bot-protection from the Render server IP, that endpoint (rather than the parser) is the blocker — in that case a rotating-proxy/residential service or a headless browser would be required for AJIO specifically.
