@@ -116,3 +116,36 @@ For a handful of products this is fine, but it multiplies connections as the lis
 3. Align (or remove) the dead `graph_exists` pre-check with the actual graph naming.
 4. Respect `limit` in `get_all_products`; reduce the N+1 stats queries.
 5. Move `secret_key` and DB password to env vars; add a server-side guard on `/delete-all`.
+
+---
+
+## 🔍 Follow-up: Myntra / AJIO / Flipkart prices not fetching (investigation + fix)
+
+**Report:** "Only Amazon fetches the price; Myntra, AJIO and Flipkart don't."
+
+**Important caveat:** This sandbox has **no outbound internet** (even `google.com`/`wikipedia.org` return HTTP 000), so I could **not live-verify** against the real sites here. I diagnosed the parsers from the code + the current, confirmed DOM/JSON structures of each site (found via web research) and verified the fixes against realistic HTML samples. Please re-test on a machine that can reach these sites.
+
+### Root causes found in `scraper.py`
+
+1. **Myntra parser was stale.** `_extract_myntra` only hunted for a `window.__INITIAL_DATA__ = {...}` blob and raw-HTML regexes. Myntra no longer ships that blob on product pages, and the parser **never used Myntra's real DOM classes** (`h1.pdp-title`, `h2.pdp-brand`, `span.pdp-price`) — so it routinely failed to find the price.
+
+2. **Structural bug in `extract_product_info` (affects all sites).** It returned on the *first* parser result that had `name OR price`. So when a site parser extracted the name but missed the price, it returned immediately and the generic `₹`-regex fallback — which *would* have found the price — never ran. This is the most likely reason you saw "name but no price."
+
+3. **Flipkart price regex grabbed the wrong number.** `_extract_flipkart` used "first `₹` in the whole page text," which can pick up an EMI/MRP/other figure instead of the selling price. Flipkart's selling price is in `div._30jeq3`; the title is in `span.B_NuCI`.
+
+4. **AJIO parser was generic-only.** `_extract_ajio` had no AJIO-specific price selector (just "first ₹"), so it relied on luck / the generic fallback.
+
+### Fixes applied (in `scraper.py`)
+
+- **`_extract_myntra`**: now reads brand from `h2.pdp-brand`, name from `h1.pdp-title`/`pdp-name`, and the **discounted selling price** from `span.pdp-price..._discount` (falls back to any `span.pdp-price`, then the old regexes). Verified: name "Roadster Striped Oversized Casual Shirt" + price ₹593 (not MRP ₹1,799).
+- **`_extract_flipkart`**: now reads title from `span.B_NuCI` and the selling price from `div._30jeq3`. Verified: ₹329 (not MRP ₹499).
+- **`_extract_ajio`**: added AJIO price selectors (`span.prod-price`, `div.prod-price`, `span.price`, `div.offer-price`, etc.). Verified: ₹599.
+- **`extract_product_info`**: rewritten to **merge** the best name/price/currency across JSON-LD, meta, the site parser, *and* generic, instead of short-circuiting. Verified: name from one parser + price from generic now merge correctly.
+- **Myntra API fallback** in `scrape()` now also triggers when the *price* is missing (not just the name), so it can backfill the price.
+
+### Still worth checking on your machine (fetch-level, not verifiable here)
+Myntra/AJIO/Flipkart all sit behind aggressive bot protection (Akamai / Myntra & AJIO custom JS challenges). Even with correct parsing, the initial fetch can return a bot/maintenance shell. If a particular URL still returns nothing, run:
+```bash
+python3 scraper.py "https://www.myntra.com/..." --verbose
+```
+and check whether the failure is `All strategies failed` (network/bot-block = not a parser issue) vs. a parse result with `price=None` (now much rarer after the fixes).

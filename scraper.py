@@ -318,19 +318,32 @@ def _extract_flipkart(html: str) -> dict | None:
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
     name = None
-    h1 = soup.find("h1")
-    if h1:
-        name = h1.get_text(strip=True)
+    # Title lives in <span class="B_NuCI">
+    t = soup.find("span", class_="B_NuCI")
+    if t:
+        name = t.get_text(strip=True)
+    if not name:
+        h1 = soup.find("h1")
+        if h1:
+            name = h1.get_text(strip=True)
     if not name:
         t = soup.find("title")
         if t:
             name = re.sub(r"\s*(Online at Best Price.*|Buy.*Flipkart.*)$", "",
                           t.get_text(strip=True), flags=re.I)
     price = None
-    text = soup.get_text(" ", strip=True)
-    prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", text)
-    if prices:
-        price = prices[0].replace(",", "")
+    # Selling price is in a <div class="_30jeq3 ..."> (skip MRP/EMI numbers)
+    el = soup.find("div", class_=re.compile(r"_30jeq3"))
+    if el:
+        m = re.search(r"[0-9][\d,]*(?:\.\d+)?", el.get_text())
+        if m:
+            price = m.group(0).replace(",", "")
+    # Fallback: first ₹ in visible text
+    if not price:
+        text = soup.get_text(" ", strip=True)
+        prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", text)
+        if prices:
+            price = prices[0].replace(",", "")
     if name or price:
         return {"name": name, "price": price, "currency": "INR", "source": "flipkart-specific"}
     return None
@@ -392,28 +405,39 @@ def _extract_amazon(html: str) -> dict | None:
 
 
 def _extract_myntra(html: str) -> dict | None:
-    name, price = None, None
-    m = re.search(r'window\.__INITIAL_DATA__\s*=\s*({.+?})\s*;?\s*</script>', html, re.S)
-    if m:
-        try:
-            data = json.loads(m.group(1))
-            pdp = data.get("pdpData") or data.get("product") or data
-            name = pdp.get("name") or pdp.get("productName")
-            brand = pdp.get("brand", {})
-            brand_name = brand.get("name") if isinstance(brand, dict) else brand
-            if brand_name and name:
-                name = f"{brand_name} {name}"
-            pi = pdp.get("price") or pdp.get("discountedPrice") or {}
-            if isinstance(pi, dict):
-                price = pi.get("discounted") or pi.get("value")
-            elif isinstance(pi, (int, float, str)):
-                price = pi
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    name, price, brand = None, None, None
+
+    # Brand lives in <h2 class="pdp-brand">
+    brand_el = soup.find("h2", class_="pdp-brand")
+    if brand_el:
+        brand = brand_el.get_text(strip=True)
+
+    # Name lives in <h1 class="pdp-title"> (fallback: pdp-name / any h1)
+    h1 = soup.find("h1")
+    if h1:
+        name = h1.get_text(strip=True)
+    if not name:
+        for cls in ("pdp-title", "pdp-name"):
+            el = soup.find(class_=cls)
+            if el:
+                name = el.get_text(strip=True)
+                break
     if not name:
         m = re.search(r'"productName"\s*:\s*"([^"]+)"', html)
         if m:
             name = m.group(1)
+
+    # Selling price is the *discounted* pdp-price span; fall back to first pdp-price
+    for cls in (re.compile(r"pdp-price_discount|pdp-discounted"),
+                re.compile(r"pdp-price")):
+        el = soup.find("span", class_=cls)
+        if el:
+            m = re.search(r"[0-9][\d,]*(?:\.\d+)?", el.get_text())
+            if m:
+                price = m.group(0).replace(",", "")
+                break
     if not price:
         m = re.search(r'"discountedPrice"\s*:\s*"?(\d+)"?', html)
         if m:
@@ -422,6 +446,10 @@ def _extract_myntra(html: str) -> dict | None:
         m = re.search(r'"price"\s*:\s*"?(\d+)"?', html)
         if m:
             price = m.group(1)
+
+    if brand and name and brand.lower() not in name.lower():
+        name = f"{brand} {name}"
+
     if name or price:
         return {"name": name, "price": price, "currency": "INR", "source": "myntra-specific"}
     return None
@@ -439,10 +467,24 @@ def _extract_ajio(html: str) -> dict | None:
         if t:
             name = re.sub(r"\s*(online|buy|ajio).*$", "", t.get_text(strip=True), flags=re.I)
     price = None
-    text = soup.get_text(" ", strip=True)
-    prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", text)
-    if prices:
-        price = prices[0].replace(",", "")
+    # AJIO product price containers (selling price), in priority order
+    for sel in ("span.prod-price", "div.prod-price", "span.price",
+                "div.price span", "strong.price", "div.offer-price",
+                "span.offer-price"):
+        try:
+            el = soup.select_one(sel)
+        except Exception:
+            el = None
+        if el:
+            m = re.search(r"[0-9][\d,]*(?:\.\d+)?", el.get_text())
+            if m:
+                price = m.group(0).replace(",", "")
+                break
+    if not price:
+        text = soup.get_text(" ", strip=True)
+        prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", text)
+        if prices:
+            price = prices[0].replace(",", "")
     if name or price:
         return {"name": name, "price": price, "currency": "INR", "source": "ajio-specific"}
     return None
@@ -479,23 +521,45 @@ SITE_PARSERS = {
 
 
 def extract_product_info(html: str, final_url: str) -> dict:
+    """Run every parser and merge the best available name/price/currency.
+
+    Previously this returned on the *first* result that had name OR price,
+    so a parser that found the name but missed the price (e.g. a stale
+    Myntra selector) short-circuited the generic parser that WOULD have
+    found the price. Merging fixes that across all sites.
+    """
     domain = urlparse(final_url).netloc.lower()
 
-    r = _extract_from_jsonld(html)
-    if r and r.get("name") and r.get("price"):
-        return r
-
-    r = _extract_from_meta(html)
-    if r and r.get("name") and r.get("price"):
-        return r
-
+    candidates = []
+    for r in (_extract_from_jsonld(html), _extract_from_meta(html)):
+        if r:
+            candidates.append(r)
     for key, parser in SITE_PARSERS.items():
         if key in domain:
             r = parser(html)
-            if r and (r.get("name") or r.get("price")):
-                return r
+            if r:
+                candidates.append(r)
+    candidates.append(_extract_generic(html))
 
-    return _extract_generic(html)
+    merged = {"name": None, "price": None, "currency": None}
+    sources = []
+    for r in candidates:
+        if not r:
+            continue
+        if merged["name"] is None and r.get("name"):
+            merged["name"] = r["name"]
+            sources.append(r.get("source"))
+        if merged["price"] is None and r.get("price"):
+            merged["price"] = r["price"]
+            sources.append(r.get("source"))
+        if merged["currency"] is None and r.get("currency"):
+            merged["currency"] = r["currency"]
+
+    if merged["name"] is not None or merged["price"] is not None:
+        merged["source"] = ",".join(dict.fromkeys(s for s in sources if s)) or None
+        return merged
+
+    return {"name": None, "price": None, "currency": None, "source": None}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -663,9 +727,10 @@ def scrape(url: str, verbose: bool = False) -> dict:
             if fb and fb.get("name"):
                 info = fb
 
-        if ("myntra" in domain) and (not info or not info.get("name")):
+        if ("myntra" in domain) and (not info or not info.get("price")):
+            # Backfill a missing price from Myntra's internal API
             fb = _myntra_api_fallback(resolved_url, verbose=verbose)
-            if fb:
+            if fb and fb.get("name"):
                 info = fb
 
         if ("ajio" in domain) and (not info or not info.get("name")):
