@@ -94,6 +94,39 @@ def _clean_amazon_url(url: str) -> str:
     return url
 
 
+def _strip_tracking_params(url: str) -> str:
+    """Drop empty/tracking query strings on retail product URLs.
+
+    Share links from AJIO/Myntra often carry a trailing '?' or utm_* /
+    social_share params (e.g. '.../p/123_brown?'). Since the URL is the
+    database key for a product, keeping that junk would fragment the price
+    history across copies of the same product.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return url
+    # Only strip for the sites this tracker normalises product URLs for.
+    host = parsed.netloc.lower()
+    if not any(d in host for d in ("ajio.com", "myntra.com", "flipkart.com",
+                                   "amazon.", "amzn.in")):
+        return url
+    # Drop the query entirely when it's empty, or purely tracking params.
+    q = parsed.query
+    if not q:
+        # trailing '?' with no query -> rebuild without it
+        return parsed._replace(query="", fragment="").geturl()
+    names = [k.lower() for k, _ in parse_qs(q).items()]
+    tracking = {"utm_source", "utm_medium", "utm_campaign", "utm_term",
+                "utm_content", "shared", "ref", "smid", "psc", "sprefix",
+                "sr", "s", "tag", "gclid", "fbclid", "igshid", "cid"}
+    if names and all(n in tracking for n in names):
+        return parsed._replace(query="", fragment="").geturl()
+    return url
+
+
 def resolve_deep_link(url: str, verbose: bool = False) -> str:
     """Follow redirects, extract real URL from deep-link params, repair malformed URLs."""
     from curl_cffi import requests as cffi_requests
@@ -455,6 +488,140 @@ def _extract_myntra(html: str) -> dict | None:
 
     if name or price:
         return {"name": name, "price": price, "currency": "INR", "source": "myntra-specific"}
+    # Fallback: Myntra embeds product data in a JS state blob
+    j = _extract_from_embedded_json(html)
+    if j and (j.get("name") or j.get("price")):
+        if not name:
+            name = j.get("name")
+        if not price:
+            price = j.get("price")
+        if name or price:
+            return {"name": name, "price": price, "currency": "INR",
+                    "source": "myntra-specific"}
+    return None
+
+
+def _is_price_like(obj):
+    """Heuristic: is obj a product-price dict (e.g. AJIO's price object)?"""
+    if not isinstance(obj, dict):
+        return False
+    value = None
+    for k in ("discounted", "current", "offerPrice", "sellingPrice", "value",
+              "price", "lowPrice"):
+        if k in obj:
+            v = obj[k]
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                value = v
+                break
+            if isinstance(v, str):
+                s = re.sub(r"[^0-9.]", "", v)
+                if s:
+                    try:
+                        value = float(s)
+                        break
+                    except ValueError:
+                        pass
+    if value is None:
+        return None
+    cur = obj.get("currency") or obj.get("priceCurrency")
+    return {"price": value, "currency": cur if isinstance(cur, str) else None}
+
+
+def _walk_for_price(node, depth=0):
+    """Recursively search embedded JSON for a price-like dict."""
+    if depth > 12:
+        return None
+    if isinstance(node, dict):
+        r = _is_price_like(node)
+        if r is not None:
+            return r
+        for v in node.values():
+            r = _walk_for_price(v, depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(node, list):
+        for v in node:
+            r = _walk_for_price(v, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+def _extract_balanced_json(html: str, start: int) -> str | None:
+    """Return the balanced {...} JSON object starting at html[start] == '{'."""
+    if start < 0 or start >= len(html) or html[start] != "{":
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(html)):
+        c = html[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start:i + 1]
+    return None
+
+
+def _extract_from_embedded_json(html: str) -> dict | None:
+    """AJIO (and Myntra) embed product data in a JS state blob; find the price."""
+    blobs = []
+    # window.__PRELOADED_STATE__ / __INITIAL_DATA__ / __myx = {...} (AJIO/Myntra)
+    for marker in ("__PRELOADED_STATE__", "__INITIAL_DATA__", "__myx"):
+        m = re.search(r"window\." + marker + r"\s*=\s*\{", html)
+        if m:
+            blob = _extract_balanced_json(html, m.end() - 1)
+            if blob:
+                blobs.append(blob)
+    # <script id="__NEXT_DATA__" type="application/json">{...}</script>
+    m = re.search(r'__NEXT_DATA__[^>]*>(.*?)</script>', html, re.S)
+    if m:
+        blobs.append(m.group(1))
+
+    name = price = currency = None
+    for blob in blobs:
+        try:
+            data = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # name
+        if name is None:
+            # Try common paths
+            cand = data
+            for path in (("product", "productDetails", "name"),
+                         ("pdpData", "name"),
+                         ("props", "pageProps", "product", "name"),
+                         ("product", "name")):
+                node = cand
+                ok = True
+                for k in path:
+                    if isinstance(node, dict) and k in node:
+                        node = node[k]
+                    else:
+                        ok = False
+                        break
+                if ok and isinstance(node, str):
+                    name = node
+                    break
+        r = _walk_for_price(data)
+        if r is not None:
+            price = r["price"]
+            currency = currency or r["currency"]
+    if name or price:
+        return {"name": name, "price": price, "currency": currency or "INR",
+                "source": "ajio-json"}
     return None
 
 
@@ -470,7 +637,7 @@ def _extract_ajio(html: str) -> dict | None:
         if t:
             name = re.sub(r"\s*(online|buy|ajio).*$", "", t.get_text(strip=True), flags=re.I)
     price = None
-    # AJIO product price containers (selling price), in priority order
+    # 1) AJIO product price containers (selling price), in priority order
     for sel in ("span.prod-price", "div.prod-price", "span.price",
                 "div.price span", "strong.price", "div.offer-price",
                 "span.offer-price"):
@@ -483,6 +650,12 @@ def _extract_ajio(html: str) -> dict | None:
             if m:
                 price = m.group(0).replace(",", "")
                 break
+    # 2) Embedded JSON (__PRELOADED_STATE__ / __NEXT_DATA__) — most reliable
+    if not price:
+        j = _extract_from_embedded_json(html)
+        if j and j.get("price"):
+            return {**j, "source": "ajio-specific"}
+    # 3) Fallback: first ₹ in visible text
     if not price:
         text = soup.get_text(" ", strip=True)
         prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", text)
@@ -742,7 +915,7 @@ def scrape(url: str, verbose: bool = False) -> dict:
                 info = fb
 
     if info:
-        info["url"] = final_url if html else resolved_url
+        info["url"] = _strip_tracking_params(final_url if html else resolved_url)
         info["domain"] = urlparse(info["url"]).netloc
         return info
 

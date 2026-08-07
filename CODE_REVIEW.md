@@ -174,3 +174,25 @@ python3 scraper.py "https://amzn.in/d/08AYC9b5" --json
    - `amzn.in/d/...` short link → follows redirect and cleans to `https://www.amazon.in/dp/ASIN`.
    - Merge-fix regression test (name from site parser + price from generic).
 2. **Improvement:** `resolve_deep_link` now also reads `af_web_dp` (AppsFlyer/OneLink web fallback). Previously it only handled `deep_link_value` and `af_dp` (http-only), so AJIO onelink links kept `?af_dp=ajio://...&af_web_dp=...` tracking params. Since the URL is used as the DB key, that would have fragmented price history. Now it resolves to the clean product URL.
+
+---
+
+## 🔍 Follow-up 3: AJIO product saved with name but price = ₹None (from your deployed app)
+
+You showed a live `curl` to your Render app: an AJIO product was saved with the **name** ("Buy brown Jackets & Coats for Men by The Indian Garage Co Online | Ajio.com") but **price ₹None**.
+
+### Diagnosis
+1. **Your Render app is running the OLD code.** The rendered HTML still has the old delete-all form (no hidden `confirm` field — which only exists in the new code). So the deployed app predates all my scraper fixes. **You must redeploy** for any scraper change to take effect.
+2. **The old AJIO parser only did "first ₹ in the page text".** AJIO renders its price via JavaScript from an embedded JSON state (`window.__PRELOADED_STATE__`), so there is **no `₹` in the raw HTML** — hence price was always `None`. Even the improved element-selector approach would have missed it, because AJIO doesn't put the price in a static `₹` element.
+3. **The stored URL kept a trailing `?`** (`.../p/443627735_brown?`), and the dashboard link `/product/https://..._brown?` is broken because the `?` is treated as a query separator.
+
+### Fixes implemented (committed + pushed)
+- **`_extract_from_embedded_json`** — robustly brace-matches and parses AJIO/Myntra JS state blobs: `window.__PRELOADED_STATE__`, `window.__INITIAL_DATA__`, `window.__myx`, and `__NEXT_DATA__`. It walks the JSON for a price-like dict (`discounted`/`current`/`offerPrice`/`sellingPrice`/`value`/`price`) plus currency. Verified: AJIO `__PRELOADED_STATE__` → price 1299; Myntra `__INITIAL_DATA__` → price 2099.
+- **`_extract_ajio`** and **`_extract_myntra`** now fall back to embedded JSON when the DOM/₹ fallbacks fail.
+- **`_strip_tracking_params`** — strips empty/trailing `?` and pure-tracking query params (`utm_*`, `shared`, `ref`, `smid`, `psc`, etc.) from AJIO/Myntra/Flipkart/Amazon product URLs, applied to the final URL before saving. Verified: `..._brown?` → `..._brown`; `.../buy?shared=true&utm_campaign=oGs` → `.../buy`.
+- **`test_scraper.py`** expanded to **13 offline tests** (all passing), covering the embedded-JSON extraction and URL cleaning.
+
+### Action needed on your side
+1. **Redeploy** the Render app from `arena/019fda90-product-price-tracker` (or `main` once merged) — the old deployed build is why nothing changed.
+2. Delete the existing `..._brown?` row from the dashboard and re-add the clean URL so the price tracks properly.
+3. If AJIO still returns price `None` after redeploy, run the AJIO URL with `--verbose` and share the output — it would then be a fetch/bot-block (Akamai) rather than a parser issue.

@@ -20,8 +20,10 @@ from scraper import (
     _extract_myntra,
     _extract_flipkart,
     _extract_ajio,
+    _extract_from_embedded_json,
     extract_product_info,
     resolve_deep_link,
+    _strip_tracking_params,
 )
 
 
@@ -118,6 +120,51 @@ class TestDeepLinkResolution(unittest.TestCase):
         })
         resolved = resolve_deep_link("https://amzn.in/d/08AYC9b5")
         self.assertEqual(resolved, "https://www.amazon.in/dp/B0CFXYZABC")
+
+
+
+class TestAJIOEmbeddedJSON(unittest.TestCase):
+    AJIO_PRELOADED = """<html><head><title>Buy brown Jackets &amp; Coats for Men by The Indian Garage Co Online | Ajio.com</title></head><body>
+<script>window.__PRELOADED_STATE__ = {"product":{"productDetails":{"name":"Men Regular Fit Printed Winter Jacket","price":{"discounted":1299,"current":1299,"offerPrice":1199,"currency":"INR"}}}};</script>
+</body></html>"""
+
+    def test_ajio_preloaded_state_price(self):
+        r = _extract_ajio(self.AJIO_PRELOADED)
+        self.assertEqual(r["price"], 1299)  # discounted selling price
+        self.assertEqual(r["name"], "Men Regular Fit Printed Winter Jacket")
+
+    def test_next_data_price(self):
+        html = ('<script id="__NEXT_DATA__" type="application/json">'
+                '{"props":{"pageProps":{"product":{"name":"Unisex Sneakers",'
+                '"price":{"current":5599,"currency":"INR"}}}}}</script>')
+        r = _extract_from_embedded_json(html)
+        self.assertEqual(r["price"], 5599)
+
+
+class TestMyntraEmbeddedJSON(unittest.TestCase):
+    MYN = """<html><body><script>window.__INITIAL_DATA__ = {"pdpData":{"name":"Formal Leather Derbys","brand":{"name":"Teakwood Leathers"},"price":{"discounted":2099,"mrp":3999,"currency":"INR"}}};</script></body></html>"""
+
+    def test_myntra_init_data_price(self):
+        r = _extract_myntra(self.MYN)
+        self.assertEqual(r["price"], 2099)
+        self.assertEqual(r["name"], "Formal Leather Derbys")
+
+
+class TestURLCleaning(unittest.TestCase):
+    def test_strips_trailing_question_mark(self):
+        self.assertEqual(
+            _strip_tracking_params("https://www.ajio.com/a/b/p/123_brown?"),
+            "https://www.ajio.com/a/b/p/123_brown")
+
+    def test_strips_tracking_params(self):
+        self.assertEqual(
+            _strip_tracking_params("https://www.myntra.com/x/1/buy?shared=true&utm_campaign=oGs"),
+            "https://www.myntra.com/x/1/buy")
+
+    def test_keeps_amazon_dp(self):
+        self.assertEqual(
+            _strip_tracking_params("https://www.amazon.in/dp/B0CFXYZABC"),
+            "https://www.amazon.in/dp/B0CFXYZABC")
 
 
 if __name__ == "__main__":
