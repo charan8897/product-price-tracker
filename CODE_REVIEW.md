@@ -221,3 +221,24 @@ Verified offline with a mocked API response: name "The Indian Garage Co Men Regu
 
 ### Action needed
 Redeploy the app again and re-test the AJIO URL. If `www.ajio.com/api/p/...` itself is blocked by Akamai bot-protection from the Render server IP, that endpoint (rather than the parser) is the blocker — in that case a rotating-proxy/residential service or a headless browser would be required for AJIO specifically.
+
+---
+
+## 🔍 Follow-up 5: Review of `playwright_ajio.py` (Playwright/Firefox AJIO scraper)
+
+**Status: it works.** Your test run returned a real result:
+```json
+{ "name": "THE INDIAN GARAGE CO Men Regular Fit Printed Winter Jacket",
+  "price": "7199", "currency": "INR", "source": "playwright-ajio" }
+```
+Playwright/Firefox **bypassed the Akamai 403** that blocked plain HTTP — the root-cause fix. 👍
+
+### Issues found & fixed
+1. **Price could be the MRP, not the selling price.** The old logic did `prices[0]` on all `₹` numbers in the page text. AJIO renders MRP first, then the discounted price (plus EMI/offer prices), so `prices[0]` can grab the MRP. (Notably, this product's API earlier returned `offerPrice` ₹1199, while Playwright returned ₹7199 — strong hint ₹7199 is the MRP.) **Fix:** now prefer structured JSON-LD `offers.price`, and only fall back to the text using the most-frequent `₹` value (the selling price repeats across blocks) instead of the first.
+2. **Unused variables** `resp` and `html` — removed (pyflakes was flagging them).
+
+### Caveats
+- The price fix is best-effort; I can't see AJIO's live DOM from this sandbox. If ₹7199 is actually correct (some jackets genuinely cost that), great — but **please re-run and verify the number matches what you see on the AJIO page**.
+- This depends on the JSON-LD / DOM staying stable; if AJIO changes markup, the selectors may need updating.
+- Playwright on Render's **free tier** can be heavy/flaky. For production AJIO tracking, a residential-proxy/scraping service is the more robust long-term option.
+- `playwright_ajio.py` is now wired into the main `scraper.py` flow as an automatic AJIO fallback.

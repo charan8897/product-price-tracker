@@ -33,7 +33,7 @@ def scrape_ajio(url: str, headful: bool = False, timeout_ms: int = 60000) -> dic
         page = context.new_page()
 
         try:
-            resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as e:
             browser.close()
             raise RuntimeError(f"Failed to load page: {e}")
@@ -41,7 +41,6 @@ def scrape_ajio(url: str, headful: bool = False, timeout_ms: int = 60000) -> dic
         # Wait for JS rendering
         page.wait_for_timeout(5000)
 
-        html = page.content()
         final_url = page.url
 
         # --- Extract product name ---
@@ -71,30 +70,34 @@ def scrape_ajio(url: str, headful: bool = False, timeout_ms: int = 60000) -> dic
 
         # --- Extract price ---
         price = None
-        # Look for MRP / price in visible text
-        body_text = page.inner_text("body")
-        prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", body_text)
-        if prices:
-            # AJIO shows MRP first, then discounted. Grab all for user.
-            price = prices[0].replace(",", "")
 
-        # Also try structured data
+        # 1) Structured data (JSON-LD) is the most reliable selling price.
+        ld_scripts = page.query_selector_all("script[type='application/ld+json']")
+        for s in ld_scripts:
+            try:
+                data = json.loads(s.inner_text())
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                offers = data.get("offers", {})
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+                cand = offers.get("price") or offers.get("lowPrice")
+                if cand:
+                    price = str(cand).replace(",", "")
+                    break
+            except Exception:
+                continue
+
+        # 2) Fallback: visible text. AJIO shows MRP AND discounted price.
+        #    Taking prices[0] can grab the MRP, so pick the most common /
+        #    smallest distinct value, which is the actual selling price.
         if not price:
-            ld_scripts = page.query_selector_all("script[type='application/ld+json']")
-            for s in ld_scripts:
-                try:
-                    data = json.loads(s.inner_text())
-                    if isinstance(data, list):
-                        data = data[0] if data else {}
-                    offers = data.get("offers", {})
-                    if isinstance(offers, list):
-                        offers = offers[0] if offers else {}
-                    price = offers.get("price") or offers.get("lowPrice")
-                    if price:
-                        price = str(price).replace(",", "")
-                        break
-                except Exception:
-                    continue
+            body_text = page.inner_text("body")
+            prices = re.findall(r"₹\s?([\d,]+(?:\.\d+)?)", body_text)
+            if prices:
+                clean = [p.replace(",", "") for p in prices]
+                from collections import Counter
+                price = Counter(clean).most_common(1)[0][0]
 
         browser.close()
 
