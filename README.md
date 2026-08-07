@@ -18,9 +18,13 @@ Track product prices from **Flipkart**, **Amazon**, **Myntra**, and **AJIO** wit
 git clone https://github.com/YOUR_USERNAME/product-price-tracker.git
 cd product-price-tracker
 
-# Setup (installs PostgreSQL + Python deps)
+# Setup (installs PostgreSQL + Python deps + Playwright Firefox browser)
 chmod +x setup.sh
 ./setup.sh
+# The Playwright Firefox browser is REQUIRED (used to scrape AJIO, which
+# blocks plain HTTP with Akamai bot-protection). setup.sh installs it
+# automatically; to install manually run:
+#   python3 -m playwright install firefox
 
 # Scrape a product
 python3 product_tracker.py "https://amzn.in/d/0goi6dbi"

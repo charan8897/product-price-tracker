@@ -35,8 +35,18 @@ echo "[1/3] Installing Python dependencies..."
 if pip3 install -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null; then
     ok "Python packages installed"
 else
-    pip3 install -q psycopg2-binary curl_cffi cloudscraper lxml apscheduler beautifulsoup4 requests matplotlib
+    pip3 install -q psycopg2-binary curl_cffi cloudscraper lxml apscheduler beautifulsoup4 requests matplotlib playwright playwright-stealth
     ok "Python packages installed (fallback)"
+fi
+
+# ──────────────────────────────────────────────────────────────
+# Step 1b: Playwright Firefox browser (REQUIRED for AJIO scraping)
+# ──────────────────────────────────────────────────────────────
+echo "[1b] Installing Playwright Firefox browser (required for AJIO)..."
+if python3 -m playwright install firefox >/dev/null 2>&1; then
+    ok "Playwright Firefox browser installed"
+else
+    fail "Could not install Playwright Firefox browser. Run: python3 -m playwright install firefox"
 fi
 
 # ──────────────────────────────────────────────────────────────

@@ -13,6 +13,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright Firefox browser (required for AJIO scraping) + system deps
+RUN python3 -m playwright install --with-deps firefox \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy app
 COPY . .
 
