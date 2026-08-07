@@ -975,6 +975,30 @@ def scrape(url: str, verbose: bool = False) -> dict:
             if fb:
                 info = fb
 
+    # Step 5: Playwright/Firefox fallback for AJIO — Akamai blocks plain HTTP
+    # (403 Access Denied), so if we still lack a price and a browser is
+    # available, render the page with a real browser to execute the JS challenge.
+    if (not info or not info.get("price")) and "ajio" in domain:
+        try:
+            from playwright_ajio import scrape_ajio
+            if verbose:
+                print("[*] Trying Playwright/Firefox fallback for AJIO (Akamai bypass)...")
+            pb = scrape_ajio(resolved_url)
+            if pb:
+                if not info:
+                    info = pb
+                else:
+                    if not info.get("name") and pb.get("name"):
+                        info["name"] = pb["name"]
+                    if not info.get("price") and pb.get("price"):
+                        info["price"] = pb["price"]
+                        info["source"] = pb.get("source", info.get("source"))
+                if info.get("url"):
+                    info["url"] = _strip_tracking_params(info["url"])
+        except Exception as e:
+            if verbose:
+                print(f"  [-] Playwright AJIO fallback failed: {e}")
+
     if info:
         info["url"] = _strip_tracking_params(final_url if html else resolved_url)
         info["domain"] = urlparse(info["url"]).netloc
