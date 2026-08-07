@@ -124,12 +124,15 @@ def resolve_deep_link(url: str, verbose: bool = False) -> str:
             if verbose:
                 print(f"  [+] Found deep_link_value: {real}")
             return real
-        if "af_dp" in qs:
-            real = unquote(qs["af_dp"][0])
-            if real.startswith("http"):
-                if verbose:
-                    print(f"  [+] Found af_dp: {real}")
-                return real
+        # af_web_dp is the web fallback deep link used by OneLink/AppsFlyer
+        # (e.g. AJIO share links from ajioapps.onelink.me).
+        for p in ("af_web_dp", "af_dp"):
+            if p in qs:
+                real = unquote(qs[p][0])
+                if real.startswith("http"):
+                    if verbose:
+                        print(f"  [+] Found {p}: {real}")
+                    return real
 
         final_url = loc
         if verbose:

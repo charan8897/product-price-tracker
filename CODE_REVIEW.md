@@ -149,3 +149,28 @@ Myntra/AJIO/Flipkart all sit behind aggressive bot protection (Akamai / Myntra &
 python3 scraper.py "https://www.myntra.com/..." --verbose
 ```
 and check whether the failure is `All strategies failed` (network/bot-block = not a parser issue) vs. a parse result with `price=None` (now much rarer after the fixes).
+
+---
+
+## 🔍 Follow-up 2: Your specific URLs (Myntra / AJIO / Amazon)
+
+You gave four URLs. I ran the scraper on all of them, but **this sandbox blocks every shopping domain** — its network allowlist only permits PyPI/GitHub. I proved it:
+- `google.com`, `wikipedia.org`, `httpbin.org` → HTTP `000`
+- `amzn.in`, `ajioapps.onelink.me`, `www.myntra.com`, `www.ajio.com`, `www.amazon.in`, `www.flipkart.com` → HTTP `000`
+- Every strategy (`curl_cffi`, `cloudscraper`, `requests`) fails at the TLS handshake: `BoringSSL SSL_connect: Connection closed abruptly (SSL_ERROR_SYSCALL)`.
+
+So I could not live-verify these exact URLs. **Please run these on your machine** (which can reach Amazon):
+```bash
+python3 scraper.py "https://www.myntra.com/mailers/shoes/teakwood-leathers/teakwood-leathers-men-black-solid-formal-leather-derbys/19318248/buy" --json
+python3 scraper.py "https://www.myntra.com/mailers/shoes/converse/converse-unisex-cons-as-1-pro-low-top-sneakers/37374578/buy" --json
+python3 scraper.py "https://ajioapps.onelink.me/ybtf/gyth7lgx" --json
+python3 scraper.py "https://amzn.in/d/08AYC9b5" --json
+```
+
+### What I did add/verify (offline)
+1. **New offline test suite** `test_scraper.py` (7 tests, all passing) covering the exact URL shapes you sent:
+   - Myntra `/mailers/.../19318248/buy` → parser selects by `myntra` in domain, extracts **discounted** price (e.g. ₹2,099 not ₹3,999 MRP).
+   - `ajioapps.onelink.me` deep link → resolves cleanly to `www.ajio.com/.../p/...` (now extracts OneLink's `af_web_dp` param).
+   - `amzn.in/d/...` short link → follows redirect and cleans to `https://www.amazon.in/dp/ASIN`.
+   - Merge-fix regression test (name from site parser + price from generic).
+2. **Improvement:** `resolve_deep_link` now also reads `af_web_dp` (AppsFlyer/OneLink web fallback). Previously it only handled `deep_link_value` and `af_dp` (http-only), so AJIO onelink links kept `?af_dp=ajio://...&af_web_dp=...` tracking params. Since the URL is used as the DB key, that would have fragmented price history. Now it resolves to the clean product URL.
