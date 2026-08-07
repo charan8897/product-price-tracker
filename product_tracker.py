@@ -15,12 +15,8 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
-import time
-import random
-from datetime import datetime
 
 # ─── DB Config ───
 import urllib.parse
@@ -94,6 +90,8 @@ def init_db():
         print("✅ Database initialized (products table ready)")
     except Exception as e:
         print(f"⚠️  init_db error: {e}")
+        # Re-raise so callers (e.g. app.ensure_db) can detect failure and retry
+        raise
 
 
 def save_product(url: str, product_name: str, price, currency: str = "INR",
@@ -360,7 +358,7 @@ Examples:
 
     # Delete modes
     if args.delete:
-        deleted = delete_product(url=args.deleted)
+        deleted = delete_product(url=args.delete)
         print(f"\n  🗑️  Deleted {deleted} record(s) for: {args.delete}\n")
         return
 

@@ -11,10 +11,8 @@ Usage:
 """
 
 import argparse
-import getpass
 import os
 import subprocess
-import sys
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIG DEFAULTS

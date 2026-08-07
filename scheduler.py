@@ -20,7 +20,6 @@ import logging
 import os
 import signal
 import sys
-import time
 from datetime import datetime, timezone, timedelta
 
 import matplotlib
@@ -31,10 +30,11 @@ import matplotlib.dates as mdates
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from product_tracker import init_db, get_conn, scrape_and_save
-from price_stats import get_price_stats, get_all_price_stats, get_latest_change, print_price_stats
+from price_stats import get_all_price_stats
 
 # ── Paths ──
-BASE_DIR = "/home/user"
+# Resolve relative to this file so the app works in Docker, Render, etc.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GRAPH_DIR = os.path.join(BASE_DIR, "price_graphs")
 LOG_FILE = os.path.join(BASE_DIR, "scheduler.log")
 
@@ -59,29 +59,6 @@ log = logging.getLogger("scheduler")
 # ──────────────────────────────────────────────────────────────────────────────
 # GRAPH GENERATION
 # ──────────────────────────────────────────────────────────────────────────────
-
-def get_price_history_for_url(url: str) -> list[dict]:
-    """Get price history for a specific URL."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT product_name, price, currency, scraped_at
-        FROM products
-        WHERE url = %s AND price IS NOT NULL
-        ORDER BY scraped_at ASC;
-    """, (url,))
-    rows = []
-    for row in cur.fetchall():
-        rows.append({
-            "name": row[0],
-            "price": float(row[1]) if row[1] else None,
-            "currency": row[2],
-            "scraped_at": row[3],
-        })
-    cur.close()
-    conn.close()
-    return rows
-
 
 def get_all_unique_urls() -> list[str]:
     """Get all distinct URLs from the products table."""

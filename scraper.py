@@ -26,7 +26,7 @@ import re
 import sys
 import time
 import random
-from urllib.parse import urlparse, urljoin, unquote, parse_qs
+from urllib.parse import urlparse, unquote, parse_qs
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1.  HTTP CLIENT LAYER

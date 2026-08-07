@@ -207,7 +207,6 @@ class TestRunner:
                 log(f"  Reading {i+1}: ₹{price:,.0f}  change=0.00% (baseline)  [{ts}]")
             else:
                 arrow = "▲" if chg > 0 else ("▼" if chg < 0 else "➡️")
-                expected_chg = self.case["expected_changes"][i] if "expected_changes" in self.case["expected"] else None
                 log(f"  Reading {i+1}: ₹{price:,.0f}  change={chg:+.2f}% {arrow}  [{ts}]")
 
         log(f"\n  Readings: {stats['num_readings']}")

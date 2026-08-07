@@ -43,4 +43,4 @@ jobs:
           DB_NAME: myapp
           DB_USER: myuser
           DB_PASS: changeme123
-        run: python3 test_price_stats.py --case 1 --offset 1
+        run: python3 test_price_stats.py --offset 1

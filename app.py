@@ -11,21 +11,21 @@ Usage:
 
 import argparse
 import base64
-import io
 import os
-import sys
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash
 
 from product_tracker import init_db, get_conn, scrape_and_save, delete_product, delete_all_products
-from price_stats import get_price_stats, get_all_price_stats, get_price_history, get_latest_change
+from price_stats import get_price_stats, get_price_history, get_latest_change
 
 IST = timezone(timedelta(hours=5, minutes=30))
-GRAPH_DIR = "/home/user/price_graphs"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GRAPH_DIR = os.path.join(BASE_DIR, "price_graphs")
+os.makedirs(GRAPH_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = "product-tracker-secret-key"
+app.secret_key = os.environ.get("SECRET_KEY", "product-tracker-secret-key")
 app.jinja_env.globals.update(float=float)
 
 # Auto-create table on first request
@@ -54,8 +54,9 @@ def get_all_products(limit=100):
         SELECT DISTINCT ON (url)
             id, url, domain, product_name, price, currency, source, scraped_at
         FROM products
-        ORDER BY url, scraped_at DESC;
-    """)
+        ORDER BY url, scraped_at DESC
+        LIMIT %s;
+    """, (limit,))
     cols = [d[0] for d in cur.description]
     rows = []
     for row in cur.fetchall():
@@ -137,10 +138,8 @@ def product_detail(url):
     stats = get_price_stats(url)
     history = get_price_history(url)
     change = get_latest_change(url)
-    graph_path = os.path.join(GRAPH_DIR, f"price_history_{url.split('/')[-1][:40]}.png")
-    graph_exists = os.path.exists(graph_path)
     return render_template_string(DETAIL_HTML, url=url, stats=stats, history=history,
-                                  change=change, graph_exists=graph_exists, now=datetime.now(IST))
+                                  change=change, now=datetime.now(IST))
 
 
 @app.route("/graph/<path:url>")
@@ -186,13 +185,16 @@ def delete_by_url(url):
 def delete_by_id(product_id):
     """Delete a single record by ID."""
     deleted = delete_product(product_id=product_id)
-    flash(f"Deleted record #{product_id}", "success")
+    flash(f"Deleted record #{product_id} ({deleted} row(s))", "success")
     return redirect(url_for("index"))
 
 
 @app.route("/delete-all", methods=["POST"])
 def delete_all():
     """Delete ALL records."""
+    if request.form.get("confirm") != "yes":
+        flash("Delete-all requires confirmation", "error")
+        return redirect(url_for("index"))
     deleted = delete_all_products()
     flash(f"Deleted ALL {deleted} record(s)", "success")
     return redirect(url_for("index"))
@@ -285,6 +287,7 @@ INDEX_HTML = """
     <div style="display:flex;gap:10px;">
       <form method="POST" action="/refresh"><button class="btn btn-secondary">🔄 Refresh All</button></form>
       <form method="POST" action="/delete-all" onsubmit="return confirm('Delete ALL tracked products?')">
+        <input type="hidden" name="confirm" value="yes">
         <button class="btn" style="background:#7f1d1d;color:#fca5a5;">🗑️ Delete All</button>
       </form>
     </div>
