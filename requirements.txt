@@ -9,5 +9,6 @@ requests>=2.31
 playwright>=1.40
 playwright-stealth>=2.0
 matplotlib>=3.8
+numpy>=1.26
 flask>=3.0
 gunicorn>=22.0

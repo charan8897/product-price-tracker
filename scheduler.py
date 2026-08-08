@@ -26,6 +26,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import numpy as np
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -163,9 +164,20 @@ def generate_graph(url: str) -> str | None:
     ax.set_xlabel("Time (IST)", fontsize=10, color="#475569")
     ax.set_ylabel("Price (₹)", fontsize=10, color="#475569")
 
+    # Place ticks only on actual data points (up to a reasonable max) so we don't
+    # get "phantom" ticks at AutoDateLocator-chosen month boundaries (Jan 01, Jul 01, ...)
+    # that don't correspond to any real reading.
+    max_ticks = 10
+    n_points = len(times)
+    if n_points <= max_ticks:
+        tick_positions = times
+    else:
+        idx = np.linspace(0, n_points - 1, max_ticks, dtype=int)
+        tick_positions = [times[i] for i in idx]
+
+    ax.set_xticks(tick_positions)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d\n%H:%M"))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    fig.autofmt_xdate(rotation=30)
+    fig.autofmt_xdate(rotation=30, ha="center")
 
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
