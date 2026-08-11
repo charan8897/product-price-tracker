@@ -60,6 +60,69 @@ python3 scheduler.py --run-now      # Force one cycle now
 python3 scheduler.py --graph        # Generate graphs now
 ```
 
+## Deployment on Render — why scheduled scrapes may not run
+
+If you host on Render and only see new prices when you click **Refresh All**,
+the scheduler is not actually running on the server. There are **two reasons**:
+
+1. **The scheduler process is never started by the Render deploy.**
+   `render.yaml` starts only the Flask web app (`app.py`). `scheduler.py` is a
+   standalone blocking process that is wired up in `docker-compose.yml` (local)
+   but **not** in the Render deployment. The "Refresh All" button works because
+   `/refresh` rescrapes inline inside the HTTP request.
+
+2. **Render's free tier hibernates your service.** Free web services spin down
+   after **15 minutes without inbound traffic** and only wake on an HTTP request
+   (~1 min cold start). So even an in-process scheduler only fires while the
+   service happens to be awake (i.e. usually never at 3 AM IST).
+   (Render's native cron jobs would fix this, but they are **paid** — minimum
+   $1/month per cron job service.)
+
+### Recommended free fix: ping `/cron/refresh` at the 5 schedule times
+
+The web app now has a `/cron/refresh` endpoint that starts a scrape cycle in a
+background thread and returns immediately — perfect for free cron pingers.
+
+1. Set a secret on the Render service (Dashboard → your service → Environment):
+   ```
+   CRON_TOKEN=<random secret>   # e.g. openssl rand -hex 24
+   ```
+   (Leave it unset if you don't care about the endpoint being public.)
+
+2. Pick **one** trigger option:
+
+   - **GitHub Actions (no third party):** a ready-made workflow is included at
+     `.github/workflows/scheduled-refresh.yml` in this repo (add it via the
+     GitHub web UI — it can't be pushed by automation without the
+     `workflows` permission). It pings `/cron/refresh` at
+     03:00, 08:00, 14:00, 17:00, 21:00 IST. Then set two repo settings:
+     - Repository **variable** `RENDER_APP_URL` = `https://<your-app>.onrender.com`
+     - Repository **secret** `CRON_TOKEN` = the same secret as above
+
+   - **cron-job.org / UptimeRobot (free):** create a cron job / HTTP monitor that
+     GETs `https://<your-app>.onrender.com/cron/refresh?token=<CRON_TOKEN>` at the
+     five times above. IST → UTC for the cron schedule:
+     `21:30, 02:30, 08:30, 11:30, 15:30 UTC`.
+
+   - **Render cron job (paid, $1/mo):** uncomment the `product-tracker-cron`
+     service in `render.yaml` and set `ENABLE_SCHEDULER=false` on the web service.
+     It runs `python3 scheduler.py --run-now` at the five times, even while the
+     web service is asleep.
+
+Each trigger wakes the service (if asleep) and runs one scrape cycle. The app
+dedupes cycles within `MINUTES_BETWEEN_CYCLES` (default 60 min), so overlapping
+triggers never double-scrape.
+
+### Notes
+
+- `ENABLE_SCHEDULER` (default `true`) turns the in-process APScheduler in
+  `app.py` on/off. It works on any always-on host (local, Docker, paid Render);
+  on the free tier it only fires while the service is awake, so keep one of the
+  external triggers above.
+- Free web services also restart at any time and lose their local filesystem —
+  the Postgres database is the only durable store, which is why all data lives
+  there.
+
 ### Tests
 ```bash
 python3 test_price_stats.py              # All 3 cases
@@ -77,7 +140,7 @@ python3 app.py --port 8080  # Custom port
 ## Project Structure
 
 ```
-├── app.py                # Flask web dashboard
+├── app.py                # Flask web dashboard (+ in-process scheduler, /cron/refresh)
 ├── scraper.py            # Universal scraper with Cloudflare bypass
 ├── product_tracker.py    # CLI tool: scrape & save to PostgreSQL
 ├── scheduler.py          # APScheduler: auto-rescrape + graphs
@@ -85,7 +148,8 @@ python3 app.py --port 8080  # Custom port
 ├── test_price_stats.py   # Test suite for price stats
 ├── setup.sh              # First-time setup script
 ├── requirements.txt      # Python dependencies
-└── README.md
+├── render.yaml           # Render blueprint (web + Postgres + optional cron)
+└── .github/workflows/    # Scheduled /cron/refresh pings (free, GitHub Actions)
 ```
 
 ## Supported Sites

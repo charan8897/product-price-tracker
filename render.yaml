@@ -14,7 +14,9 @@ services:
     buildCommand: |
       pip install -r requirements.txt &&
       python3 -m playwright install --with-deps firefox
-    startCommand: python3 app.py --host 0.0.0.0 --port $PORT
+    # gunicorn (1 worker) — matches Procfile; a single worker keeps the
+    # in-process scheduler from starting multiple times.
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 4
     envVars:
       - key: DB_HOST
         fromDatabase:
@@ -36,3 +38,48 @@ services:
         fromDatabase:
           name: product-tracker-db
           property: password
+      # In-process scheduler (fires only while the service is awake). On the
+      # free plan the service sleeps after 15 min of inactivity, so pair this
+      # with an external cron pinger hitting /cron/refresh (see README).
+      # Set to "false" if you use the Render cron job below instead.
+      - key: ENABLE_SCHEDULER
+        value: "true"
+      # Secret for the /cron/refresh endpoint. Generate one (e.g.
+      # `openssl rand -hex 24`) and paste it here / in the Render dashboard.
+      # sync: false keeps your dashboard value on future deploys.
+      - key: CRON_TOKEN
+        value: change-me-to-a-random-secret
+        sync: false
+
+  # Optional — Render-native cron job (PAID: minimum $1/month per cron job
+  # service). Runs scheduler.py --run-now at 3:00, 8:00, 14:00, 17:00, 21:00 IST
+  # (= 21:30, 02:30, 08:30, 11:30, 15:30 UTC). This works even while the free
+  # web service is asleep. If you enable it, set ENABLE_SCHEDULER=false on the
+  # web service above to avoid double runs.
+  # - type: cron
+  #   name: product-tracker-cron
+  #   plan: starter
+  #   schedule: "30 21,2,8,11,15 * * *"
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: python3 scheduler.py --run-now
+  #   envVars:
+  #     - key: DB_HOST
+  #       fromDatabase:
+  #         name: product-tracker-db
+  #         property: host
+  #     - key: DB_PORT
+  #       fromDatabase:
+  #         name: product-tracker-db
+  #         property: port
+  #     - key: DB_NAME
+  #       fromDatabase:
+  #         name: product-tracker-db
+  #         property: database
+  #     - key: DB_USER
+  #       fromDatabase:
+  #         name: product-tracker-db
+  #         property: user
+  #     - key: DB_PASS
+  #       fromDatabase:
+  #         name: product-tracker-db
+  #         property: password

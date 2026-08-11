@@ -12,6 +12,7 @@ Usage:
 import argparse
 import base64
 import os
+import threading
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash
@@ -101,6 +102,96 @@ def get_recent_changes(limit=10):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SCHEDULING
+# ──────────────────────────────────────────────────────────────────────────────
+# Scheduled scrape times (IST): 3 AM, 8 AM, 2 PM, 5 PM, 9 PM
+SCHEDULE_TIMES_IST = [(3, 0), (8, 0), (14, 0), (17, 0), (21, 0)]
+
+# Set ENABLE_SCHEDULER=false to disable the in-process scheduler
+# (e.g. when you trigger scrapes externally via /cron/refresh).
+ENABLE_SCHEDULER = os.environ.get("ENABLE_SCHEDULER", "true").strip().lower() in ("1", "true", "yes", "on")
+
+# Minimum minutes between scrape cycles. Prevents duplicate runs when the
+# in-process scheduler and an external cron pinger (cron-job.org, GitHub
+# Actions, UptimeRobot, Render cron job) both fire around the same time.
+MINUTES_BETWEEN_CYCLES = int(os.environ.get("MINUTES_BETWEEN_CYCLES", "60"))
+
+_cycle_lock = threading.Lock()
+_last_cycle_finished = None  # datetime (UTC) — resets when the process restarts
+
+
+def trigger_scrape_cycle() -> bool:
+    """Start a scrape cycle in a background thread. Returns True if a cycle started."""
+    global _last_cycle_finished
+    now = datetime.now(timezone.utc)
+
+    if _last_cycle_finished is not None:
+        elapsed_min = (now - _last_cycle_finished).total_seconds() / 60
+        if elapsed_min < MINUTES_BETWEEN_CYCLES:
+            print(f"⏭️  Skipping scrape cycle — last one finished {elapsed_min:.0f} min ago")
+            return False
+
+    if not _cycle_lock.acquire(blocking=False):
+        print("⏭️  Skipping scrape cycle — another cycle is already running")
+        return False
+
+    def worker():
+        global _last_cycle_finished
+        try:
+            from scheduler import run_scrape_cycle
+            run_scrape_cycle()
+        except Exception as e:
+            print(f"❌ Scrape cycle error: {e}")
+        finally:
+            _last_cycle_finished = datetime.now(timezone.utc)
+            _cycle_lock.release()
+
+    threading.Thread(target=worker, name="scrape-cycle", daemon=True).start()
+    print("🚀 Scrape cycle started in background thread")
+    return True
+
+
+def start_background_scheduler():
+    """Start the in-process APScheduler (fires only while the process is awake).
+
+    On Render's free tier the service sleeps after ~15 min of inactivity, so this
+    alone is not enough for server-side scheduling — pair it with an external
+    cron pinger hitting /cron/refresh (see README → Deployment on Render).
+    """
+    if not ENABLE_SCHEDULER:
+        print("⏰ In-process scheduler disabled (ENABLE_SCHEDULER != true)")
+        return None
+    try:
+        init_db()
+    except Exception as e:
+        print(f"⚠️  init_db at startup failed (will retry on first request): {e}")
+
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    sched = BackgroundScheduler(timezone="Asia/Kolkata")
+    for hour, minute in SCHEDULE_TIMES_IST:
+        sched.add_job(
+            trigger_scrape_cycle,
+            "cron",
+            hour=hour, minute=minute,
+            id=f"scrape_{hour:02d}{minute:02d}",
+            name=f"Scrape ({hour:02d}:{minute:02d} IST)",
+            misfire_grace_time=3600,
+            coalesce=True,
+            max_instances=1,
+        )
+    sched.start()
+    times = ", ".join(f"{h:02d}:{m:02d} IST" for h, m in SCHEDULE_TIMES_IST)
+    print(f"⏰ In-process scheduler started — will scrape at {times}")
+    return sched
+
+
+# Start the in-process scheduler when the app boots (covers both `python3 app.py`
+# and gunicorn; the module-level call runs exactly once per worker process).
+_BACKGROUND_SCHEDULER = start_background_scheduler()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -156,21 +247,51 @@ def product_graph(url):
 
 @app.route("/refresh", methods=["POST"])
 def refresh_all():
-    """Rescrape all registered URLs."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT DISTINCT url FROM products;")
-    urls = [row[0] for row in cur.fetchall()]
-    cur.close()
-    conn.close()
+    """Rescrape all registered URLs (manual 'Refresh All' button)."""
+    global _last_cycle_finished
+    if not _cycle_lock.acquire(blocking=False):
+        flash("A refresh is already running — try again in a moment", "error")
+        return redirect(url_for("index"))
 
-    for u in urls:
-        try:
-            scrape_and_save(u)
-        except Exception:
-            pass
-    flash(f"Refreshed {len(urls)} product(s)", "success")
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT url FROM products;")
+        urls = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+
+        for u in urls:
+            try:
+                scrape_and_save(u)
+            except Exception:
+                pass
+        flash(f"Refreshed {len(urls)} product(s)", "success")
+    finally:
+        _last_cycle_finished = datetime.now(timezone.utc)
+        _cycle_lock.release()
     return redirect(url_for("index"))
+
+
+@app.route("/cron/refresh", methods=["GET", "POST"])
+def cron_refresh():
+    """Trigger a scrape cycle from an external cron pinger.
+
+    Free-tier friendly alternative to a Render cron job: point cron-job.org,
+    UptimeRobot, or the GitHub Actions workflow at
+        https://<your-app>.onrender.com/cron/refresh?token=<CRON_TOKEN>
+    Each hit wakes the service (if Render spun it down) and starts a scrape
+    cycle in a background thread. The request returns immediately.
+
+    If the CRON_TOKEN env var is set, it must match the `token` query param.
+    """
+    token = os.environ.get("CRON_TOKEN", "").strip()
+    if token and request.args.get("token") != token:
+        return "Unauthorized", 401
+    started = trigger_scrape_cycle()
+    if started:
+        return "Scrape cycle started", 202
+    return "Scrape cycle skipped (recent run or already in progress)", 200
 
 
 @app.route("/delete/<path:url>", methods=["POST"])
