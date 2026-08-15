@@ -162,6 +162,8 @@ python3 test_price_stats.py              # All 3 cases
 python3 test_price_stats.py --case 1     # Highest price test
 python3 test_price_stats.py --case 2     # Average price test
 python3 test_scheduler_catchup.py        # Wake-up catch-up scheduler logic (no DB needed)
+# (to run this in CI, add it to .github/workflows/ci.yml via the GitHub web UI —
+#  automation can't push workflow file changes without the `workflows` permission)
 python3 test_price_stats.py --case 3     # Lowest price test
 ```
 
