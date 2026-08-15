@@ -17,6 +17,9 @@ services:
     # gunicorn (1 worker) — matches Procfile; a single worker keeps the
     # in-process scheduler from starting multiple times.
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 4
+    # Cheap endpoint for Render's health checks / any uptime pinger. Each hit
+    # also runs the missed-slot catch-up check.
+    healthCheckPath: /healthz
     envVars:
       - key: DB_HOST
         fromDatabase:
@@ -44,6 +47,19 @@ services:
       # Set to "false" if you use the Render cron job below instead.
       - key: ENABLE_SCHEDULER
         value: "true"
+      # When the free instance is woken by an HTTP request ("Incoming HTTP
+      # request detected ... Service waking up ..."), run any scheduled slot
+      # that passed while it was hibernating. This is what makes scheduling
+      # survive spin-down; the last-run marker lives in Postgres.
+      - key: CATCH_UP_ON_WAKE
+        value: "true"
+      # Ignore a slot for N minutes after it passes, so the in-process
+      # scheduler gets first crack at it when the service is already awake.
+      - key: CATCH_UP_GRACE_MINUTES
+        value: "2"
+      # Minimum minutes between scrape cycles (dedupes overlapping triggers).
+      - key: MINUTES_BETWEEN_CYCLES
+        value: "60"
       # Secret for the /cron/refresh endpoint. Generate one (e.g.
       # `openssl rand -hex 24`) and paste it here / in the Render dashboard.
       # sync: false keeps your dashboard value on future deploys.

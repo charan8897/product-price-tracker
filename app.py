@@ -19,6 +19,14 @@ from flask import Flask, render_template_string, request, redirect, url_for, fla
 
 from product_tracker import init_db, get_conn, scrape_and_save, delete_product, delete_all_products
 from price_stats import get_price_stats, get_price_history, get_latest_change
+from job_state import (
+    init_state_table,
+    get_last_cycle_time,
+    set_last_cycle_time,
+    is_cycle_due,
+    previous_slot,
+    cycle_lock,
+)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,10 +46,42 @@ def ensure_db():
     if not _db_initialized:
         try:
             init_db()
+            init_state_table()
             _db_initialized = True
             print("✅ DB table ensured on first request")
         except Exception as e:
             print(f"⚠️ DB init error: {e}")
+
+
+@app.before_request
+def catch_up_on_wake():
+    """Recover slots missed while the host had the service hibernated.
+
+    Free-tier hosts spin the service down after ~15 min of inactivity and wake it
+    on the next HTTP request — the exact log you see ("Incoming HTTP request
+    detected … Service waking up …"). While asleep no in-process timer can fire,
+    so any scheduled slot that passed during the nap is simply lost.
+
+    Every incoming request (including the one that woke us) cheaply checks the
+    durable last-run marker in Postgres: if a scheduled slot has passed since the
+    last completed cycle, one cycle is kicked off in a background thread. The
+    request itself is never blocked.
+    """
+    if not CATCH_UP_ON_WAKE or request.path.startswith("/static"):
+        return
+    global _last_catchup_check
+    now = datetime.now(timezone.utc)
+    # Rate-limit the (tiny) DB lookup so a burst of requests doesn't hammer it.
+    if _last_catchup_check and (now - _last_catchup_check).total_seconds() < 60:
+        return
+    _last_catchup_check = now
+    try:
+        due, reason = is_cycle_due(SCHEDULE_TIMES_IST, grace_minutes=CATCH_UP_GRACE_MINUTES)
+        if due:
+            print(f"⏰ Catch-up triggered on wake — {reason}")
+            trigger_scrape_cycle(reason="catch-up on wake")
+    except Exception as e:
+        print(f"⚠️  Catch-up check failed: {e}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -116,17 +156,29 @@ ENABLE_SCHEDULER = os.environ.get("ENABLE_SCHEDULER", "true").strip().lower() in
 # Actions, UptimeRobot, Render cron job) both fire around the same time.
 MINUTES_BETWEEN_CYCLES = int(os.environ.get("MINUTES_BETWEEN_CYCLES", "60"))
 
-_cycle_lock = threading.Lock()
-_last_cycle_finished = None  # datetime (UTC) — resets when the process restarts
+# Run missed slots when a hibernated service is woken by an HTTP request.
+CATCH_UP_ON_WAKE = os.environ.get("CATCH_UP_ON_WAKE", "true").strip().lower() in ("1", "true", "yes", "on")
+# Ignore a slot for this many minutes after it passes (the in-process scheduler
+# gets first crack at it if the service happens to be awake).
+CATCH_UP_GRACE_MINUTES = int(os.environ.get("CATCH_UP_GRACE_MINUTES", "2"))
+
+_cycle_lock = threading.Lock()          # guards this process
+_last_catchup_check = None              # throttles the per-request due check
 
 
-def trigger_scrape_cycle() -> bool:
-    """Start a scrape cycle in a background thread. Returns True if a cycle started."""
-    global _last_cycle_finished
+def trigger_scrape_cycle(reason: str = "scheduled") -> bool:
+    """Start a scrape cycle in a background thread. Returns True if a cycle started.
+
+    Three layers of protection against duplicate work:
+      1. durable last-run marker in Postgres (survives restarts/hibernation),
+      2. an in-process lock (concurrent requests in the same worker),
+      3. a Postgres advisory lock (other gunicorn workers / other instances).
+    """
     now = datetime.now(timezone.utc)
 
-    if _last_cycle_finished is not None:
-        elapsed_min = (now - _last_cycle_finished).total_seconds() / 60
+    last = get_last_cycle_time()
+    if last is not None:
+        elapsed_min = (now - last).total_seconds() / 60
         if elapsed_min < MINUTES_BETWEEN_CYCLES:
             print(f"⏭️  Skipping scrape cycle — last one finished {elapsed_min:.0f} min ago")
             return False
@@ -136,18 +188,24 @@ def trigger_scrape_cycle() -> bool:
         return False
 
     def worker():
-        global _last_cycle_finished
         try:
-            from scheduler import run_scrape_cycle
-            run_scrape_cycle()
+            with cycle_lock() as acquired:
+                if not acquired:
+                    print("⏭️  Skipping scrape cycle — another worker holds the lock")
+                    return
+                from scheduler import run_scrape_cycle
+                run_scrape_cycle()
+                set_last_cycle_time()
         except Exception as e:
             print(f"❌ Scrape cycle error: {e}")
+            # Still stamp the run so a hard-failing scrape can't hot-loop on
+            # every incoming request while the service is awake.
+            set_last_cycle_time()
         finally:
-            _last_cycle_finished = datetime.now(timezone.utc)
             _cycle_lock.release()
 
     threading.Thread(target=worker, name="scrape-cycle", daemon=True).start()
-    print("🚀 Scrape cycle started in background thread")
+    print(f"🚀 Scrape cycle started in background thread ({reason})")
     return True
 
 
@@ -163,6 +221,7 @@ def start_background_scheduler():
         return None
     try:
         init_db()
+        init_state_table()
     except Exception as e:
         print(f"⚠️  init_db at startup failed (will retry on first request): {e}")
 
@@ -183,6 +242,8 @@ def start_background_scheduler():
     sched.start()
     times = ", ".join(f"{h:02d}:{m:02d} IST" for h, m in SCHEDULE_TIMES_IST)
     print(f"⏰ In-process scheduler started — will scrape at {times}")
+    if CATCH_UP_ON_WAKE:
+        print("⏰ Catch-up on wake enabled — missed slots run on the next request")
     return sched
 
 
@@ -248,7 +309,6 @@ def product_graph(url):
 @app.route("/refresh", methods=["POST"])
 def refresh_all():
     """Rescrape all registered URLs (manual 'Refresh All' button)."""
-    global _last_cycle_finished
     if not _cycle_lock.acquire(blocking=False):
         flash("A refresh is already running — try again in a moment", "error")
         return redirect(url_for("index"))
@@ -268,7 +328,7 @@ def refresh_all():
                 pass
         flash(f"Refreshed {len(urls)} product(s)", "success")
     finally:
-        _last_cycle_finished = datetime.now(timezone.utc)
+        set_last_cycle_time()
         _cycle_lock.release()
     return redirect(url_for("index"))
 
@@ -288,10 +348,49 @@ def cron_refresh():
     token = os.environ.get("CRON_TOKEN", "").strip()
     if token and request.args.get("token") != token:
         return "Unauthorized", 401
-    started = trigger_scrape_cycle()
+    started = trigger_scrape_cycle(reason="external cron ping")
     if started:
         return "Scrape cycle started", 202
     return "Scrape cycle skipped (recent run or already in progress)", 200
+
+
+@app.route("/healthz")
+def healthz():
+    """Cheap liveness endpoint — ideal target for an uptime pinger.
+
+    Hitting this every ~10 minutes keeps a free-tier service from hibernating,
+    which lets the in-process scheduler fire at the real slot times. It also
+    runs the catch-up check (via the before_request hook), so even an
+    occasional ping recovers missed slots.
+    """
+    return "ok", 200
+
+
+@app.route("/scheduler/status")
+def scheduler_status():
+    """JSON view of the scheduler — handy for debugging 'it never runs'."""
+    last = get_last_cycle_time()
+    slot = previous_slot(SCHEDULE_TIMES_IST)
+    due, reason = is_cycle_due(SCHEDULE_TIMES_IST, grace_minutes=CATCH_UP_GRACE_MINUTES)
+    jobs = []
+    if _BACKGROUND_SCHEDULER:
+        for job in _BACKGROUND_SCHEDULER.get_jobs():
+            nxt = getattr(job, "next_run_time", None)
+            jobs.append({"id": job.id, "name": job.name,
+                         "next_run": nxt.isoformat() if nxt else None})
+    return {
+        "in_process_scheduler": bool(_BACKGROUND_SCHEDULER),
+        "catch_up_on_wake": CATCH_UP_ON_WAKE,
+        "minutes_between_cycles": MINUTES_BETWEEN_CYCLES,
+        "schedule_ist": [f"{h:02d}:{m:02d}" for h, m in SCHEDULE_TIMES_IST],
+        "last_cycle_finished_utc": last.isoformat() if last else None,
+        "last_cycle_finished_ist": last.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last else None,
+        "latest_slot_ist": slot.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        "cycle_due_now": due,
+        "reason": reason,
+        "cycle_running": _cycle_lock.locked(),
+        "jobs": jobs,
+    }
 
 
 @app.route("/delete/<path:url>", methods=["POST"])

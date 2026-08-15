@@ -60,74 +60,116 @@ python3 scheduler.py --run-now      # Force one cycle now
 python3 scheduler.py --graph        # Generate graphs now
 ```
 
-## Deployment on Render — why scheduled scrapes may not run
+## Deployment on a sleeping host — why scheduled scrapes stop
 
-If you host on Render and only see new prices when you click **Refresh All**,
-the scheduler is not actually running on the server. There are **two reasons**:
+If your host prints something like this in the logs…
 
-1. **The scheduler process is never started by the Render deploy.**
-   `render.yaml` starts only the Flask web app (`app.py`). `scheduler.py` is a
-   standalone blocking process that is wired up in `docker-compose.yml` (local)
-   but **not** in the Render deployment. The "Refresh All" button works because
-   `/refresh` rescrapes inline inside the HTTP request.
+```
+Incoming HTTP request detected ...
+Service waking up ...
+Allocating compute resources ...
+```
 
-2. **Render's free tier hibernates your service.** Free web services spin down
-   after **15 minutes without inbound traffic** and only wake on an HTTP request
-   (~1 min cold start). So even an in-process scheduler only fires while the
-   service happens to be awake (i.e. usually never at 3 AM IST).
-   (Render's native cron jobs would fix this, but they are **paid** — minimum
-   $1/month per cron job service.)
+…then your web service **hibernates**. Free tiers on Render/Railway/Fly spin the
+container down after ~15 minutes without traffic and only start it again when an
+HTTP request arrives (~1 min cold start).
 
-### Recommended free fix: ping `/cron/refresh` at the 5 schedule times
+While the service is asleep **no process exists**, so:
 
-The web app now has a `/cron/refresh` endpoint that starts a scrape cycle in a
-background thread and returns immediately — perfect for free cron pingers.
+- the in-process APScheduler in `app.py` isn't running and can't fire at 3 AM;
+- anything remembered in memory or on the local disk is wiped on every restart.
 
-1. Set a secret on the Render service (Dashboard → your service → Environment):
-   ```
-   CRON_TOKEN=<random secret>   # e.g. openssl rand -hex 24
-   ```
-   (Leave it unset if you don't care about the endpoint being public.)
+That's why prices only updated when you clicked **Refresh All** — `/refresh`
+scrapes inline inside the HTTP request, which is the one code path that always
+has a live process.
 
-2. Pick **one** trigger option:
+### How this repo fixes it
 
-   - **GitHub Actions (no third party):** a ready-made workflow is included at
-     `.github/workflows/scheduled-refresh.yml` in this repo (add it via the
-     GitHub web UI — it can't be pushed by automation without the
-     `workflows` permission). It pings `/cron/refresh` at
-     03:00, 08:00, 14:00, 17:00, 21:00 IST. Then set two repo settings:
-     - Repository **variable** `RENDER_APP_URL` = `https://<your-app>.onrender.com`
-     - Repository **secret** `CRON_TOKEN` = the same secret as above
+**1. Durable scheduler state in Postgres (`job_state.py`).**
+The time of the last completed cycle is stored in a `scheduler_state` table
+instead of in memory, so it survives spin-down, restarts and redeploys.
 
-   - **cron-job.org / UptimeRobot (free):** create a cron job / HTTP monitor that
-     GETs `https://<your-app>.onrender.com/cron/refresh?token=<CRON_TOKEN>` at the
-     five times above. IST → UTC for the cron schedule:
-     `21:30, 02:30, 08:30, 11:30, 15:30 UTC`.
+**2. Catch-up on wake.**
+Every incoming request — *including the very request that woke the service* —
+does a cheap check: "has a scheduled slot passed since the last completed
+cycle?" If yes, one scrape cycle runs in a background thread and the request
+returns immediately. So the 3 AM slot is scraped the next time anyone (a user,
+an uptime pinger, a cron ping) touches the app. The check itself is throttled to
+once per minute per process.
 
-   - **Render cron job (paid, $1/mo):** uncomment the `product-tracker-cron`
-     service in `render.yaml` and set `ENABLE_SCHEDULER=false` on the web service.
-     It runs `python3 scheduler.py --run-now` at the five times, even while the
-     web service is asleep.
+**3. Duplicate protection at three levels.**
+A Postgres advisory lock (across workers/instances), an in-process lock, and the
+`MINUTES_BETWEEN_CYCLES` window (default 60) mean overlapping triggers can never
+double-scrape.
 
-Each trigger wakes the service (if asleep) and runs one scrape cycle. The app
-dedupes cycles within `MINUTES_BETWEEN_CYCLES` (default 60 min), so overlapping
-triggers never double-scrape.
+**4. Observability.** `GET /scheduler/status` returns JSON with the last cycle
+time, the latest slot, whether a cycle is due, and the next run of each job.
+
+With this in place scheduling works *without* any paid cron service — but the
+scrape happens **at the next request after the slot**, not exactly at 3 AM. To
+get exact times, keep the service awake or trigger it externally:
+
+### Optional: hit the slots exactly on time
+
+Pick **one**:
+
+- **Uptime pinger on `/healthz` (free, simplest).** Point UptimeRobot /
+  cron-job.org / BetterStack at `https://<your-app>/healthz` every 10 minutes.
+  The service never sleeps, so the in-process scheduler fires exactly at
+  03:00, 08:00, 14:00, 17:00, 21:00 IST. (Note: this burns free instance hours.)
+
+- **Cron pinger on `/cron/refresh` (free, no third party).** A ready-made
+  GitHub Actions workflow is provided at `.workflows-to-add/scheduled-refresh.yml`
+  — copy it to `.github/workflows/` yourself (GitHub blocks Apps without the
+  `workflows` permission from writing that directory; see
+  `.workflows-to-add/README.md`). It GETs `https://<your-app>/cron/refresh?token=<CRON_TOKEN>` at the five slot
+  times (IST → UTC: `30 21,2,8,11,15 * * *`), waking the service and starting
+  one cycle. To enable it, set two repo settings under
+  **Settings → Secrets and variables → Actions**:
+  - **variable** `APP_URL` = `https://<your-app>.onrender.com`
+  - **secret** `CRON_TOKEN` = the same secret as on the server
+
+  It can also be run by hand from the **Actions** tab (`workflow_dispatch`).
+  Note GitHub's scheduled runs are best-effort and can lag by several minutes
+  under load, and Actions disables schedules on repos with 60 days of no
+  activity.
+
+- **Render cron job (paid, ~$1/mo).** Uncomment `product-tracker-cron` in
+  `render.yaml` and set `ENABLE_SCHEDULER=false` on the web service. Use
+  `python3 scheduler.py --run-now`, or `--if-due` if you want it to skip slots
+  that were already covered by a catch-up run.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ENABLE_SCHEDULER` | `true` | In-process APScheduler (fires only while awake). |
+| `CATCH_UP_ON_WAKE` | `true` | Run missed slots on the next incoming request. |
+| `CATCH_UP_GRACE_MINUTES` | `2` | Ignore a slot this long after it passes, letting the in-process scheduler take it first. |
+| `MINUTES_BETWEEN_CYCLES` | `60` | Minimum gap between cycles; dedupes overlapping triggers. |
+| `CRON_TOKEN` | *(unset)* | If set, `/cron/refresh` requires `?token=<value>`. |
+
+### Endpoints
+
+| Route | Purpose |
+| --- | --- |
+| `GET /healthz` | Liveness probe / keep-alive target. Also runs the catch-up check. |
+| `GET /scheduler/status` | JSON scheduler diagnostics. |
+| `GET|POST /cron/refresh` | Start a scrape cycle now (token-protected). |
+| `POST /refresh` | Manual "Refresh All" — scrapes inline. |
 
 ### Notes
 
-- `ENABLE_SCHEDULER` (default `true`) turns the in-process APScheduler in
-  `app.py` on/off. It works on any always-on host (local, Docker, paid Render);
-  on the free tier it only fires while the service is awake, so keep one of the
-  external triggers above.
-- Free web services also restart at any time and lose their local filesystem —
-  the Postgres database is the only durable store, which is why all data lives
-  there.
+- Free web services restart at any time and lose their local filesystem — the
+  Postgres database is the only durable store, which is why all scheduler state
+  lives there alongside the price history.
 
 ### Tests
 ```bash
 python3 test_price_stats.py              # All 3 cases
 python3 test_price_stats.py --case 1     # Highest price test
 python3 test_price_stats.py --case 2     # Average price test
+python3 test_scheduler_catchup.py        # Wake-up catch-up scheduler logic (no DB needed)
 python3 test_price_stats.py --case 3     # Lowest price test
 ```
 
@@ -143,7 +185,8 @@ python3 app.py --port 8080  # Custom port
 ├── app.py                # Flask web dashboard (+ in-process scheduler, /cron/refresh)
 ├── scraper.py            # Universal scraper with Cloudflare bypass
 ├── product_tracker.py    # CLI tool: scrape & save to PostgreSQL
-├── scheduler.py          # APScheduler: auto-rescrape + graphs
+├── scheduler.py          # APScheduler: auto-rescrape + graphs (--if-due for cron)
+├── job_state.py          # Durable scheduler state in Postgres + advisory lock
 ├── price_stats.py        # Price statistics calculator
 ├── test_price_stats.py   # Test suite for price stats
 ├── setup.sh              # First-time setup script

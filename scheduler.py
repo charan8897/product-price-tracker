@@ -31,6 +31,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from product_tracker import init_db, get_conn, scrape_and_save
 from price_stats import get_all_price_stats
+from job_state import init_state_table, set_last_cycle_time, is_cycle_due
 
 # ── Paths ──
 # Resolve relative to this file so the app works in Docker, Render, etc.
@@ -40,6 +41,15 @@ LOG_FILE = os.path.join(BASE_DIR, "scheduler.log")
 
 # ── Timezone ──
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# ── Production schedule (IST) ──
+PRODUCTION_TIMES = [
+    (3,  0, "morning"),
+    (8,  0, "breakfast"),
+    (14, 0, "afternoon"),
+    (17, 0, "evening"),
+    (21, 0, "night"),
+]
 
 # ── Logging ──
 os.makedirs(GRAPH_DIR, exist_ok=True)
@@ -305,6 +315,10 @@ def run_scrape_cycle():
             log.info(f"     Change:    {change_icon} {change_pct:+.2f}%  (vs previous reading)")
             log.info(f"     Readings:  {s['num_readings']}")
 
+    # Record the run durably so the web app (and the next cold start) knows a
+    # cycle completed and doesn't re-run this slot.
+    set_last_cycle_time()
+
     log.info(f"{'='*60}\n")
 
 
@@ -336,14 +350,7 @@ def create_scheduler(test_times: list[tuple[int, int]] | None = None) -> Blockin
             )
     else:
         # PRODUCTION SCHEDULE: 3 AM, 8 AM, 2 PM, 5 PM, 9 PM
-        times = [
-            (3,  0, "morning"),
-            (8,  0, "breakfast"),
-            (14, 0, "afternoon"),
-            (17, 0, "evening"),
-            (21, 0, "night"),
-        ]
-        for hour, minute, label in times:
+        for hour, minute, label in PRODUCTION_TIMES:
             scheduler.add_job(
                 run_scrape_cycle,
                 "cron",
@@ -368,9 +375,16 @@ def main():
     parser.add_argument("--run-now", action="store_true", help="Run one cycle immediately")
     parser.add_argument("--graph", action="store_true", help="Generate graphs now")
     parser.add_argument("--status", action="store_true", help="Show status")
+    parser.add_argument("--if-due", action="store_true",
+                        help="Run a cycle only if a scheduled slot was missed "
+                             "(safe to call from a frequent external cron)")
     args = parser.parse_args()
 
     init_db()
+    try:
+        init_state_table()
+    except Exception as e:
+        log.warning(f"scheduler_state table unavailable: {e}")
 
     if args.graph:
         generate_all_graphs()
@@ -382,6 +396,16 @@ def main():
         for u in urls:
             print(f"     • {u}")
         print()
+        return
+
+    if args.if_due:
+        schedule = [(h, m) for h, m, _ in PRODUCTION_TIMES]
+        due, reason = is_cycle_due(schedule)
+        if not due:
+            log.info(f"⏭️  Nothing due — {reason}")
+            return
+        log.info(f"⚡ Catch-up run — {reason}")
+        run_scrape_cycle()
         return
 
     if args.run_now:
