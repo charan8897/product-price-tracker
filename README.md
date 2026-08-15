@@ -118,13 +118,21 @@ Pick **one**:
   The service never sleeps, so the in-process scheduler fires exactly at
   03:00, 08:00, 14:00, 17:00, 21:00 IST. (Note: this burns free instance hours.)
 
-- **Cron pinger on `/cron/refresh` (free).** Schedule a GET of
-  `https://<your-app>/cron/refresh?token=<CRON_TOKEN>` at the five slot times.
-  IST → UTC: `30 21,2,8,11,15 * * *`. Each hit wakes the service and starts one
-  cycle. A ready-made GitHub Actions workflow can live at
-  `.github/workflows/scheduled-refresh.yml` (add it via the GitHub web UI —
-  automation can't push workflow files without the `workflows` permission).
-  Then set repo **variable** `RENDER_APP_URL` and repo **secret** `CRON_TOKEN`.
+- **Cron pinger on `/cron/refresh` (free, no third party).** A ready-made
+  GitHub Actions workflow is provided at `.workflows-to-add/scheduled-refresh.yml`
+  — copy it to `.github/workflows/` yourself (GitHub blocks Apps without the
+  `workflows` permission from writing that directory; see
+  `.workflows-to-add/README.md`). It GETs `https://<your-app>/cron/refresh?token=<CRON_TOKEN>` at the five slot
+  times (IST → UTC: `30 21,2,8,11,15 * * *`), waking the service and starting
+  one cycle. To enable it, set two repo settings under
+  **Settings → Secrets and variables → Actions**:
+  - **variable** `APP_URL` = `https://<your-app>.onrender.com`
+  - **secret** `CRON_TOKEN` = the same secret as on the server
+
+  It can also be run by hand from the **Actions** tab (`workflow_dispatch`).
+  Note GitHub's scheduled runs are best-effort and can lag by several minutes
+  under load, and Actions disables schedules on repos with 60 days of no
+  activity.
 
 - **Render cron job (paid, ~$1/mo).** Uncomment `product-tracker-cron` in
   `render.yaml` and set `ENABLE_SCHEDULER=false` on the web service. Use
@@ -162,8 +170,6 @@ python3 test_price_stats.py              # All 3 cases
 python3 test_price_stats.py --case 1     # Highest price test
 python3 test_price_stats.py --case 2     # Average price test
 python3 test_scheduler_catchup.py        # Wake-up catch-up scheduler logic (no DB needed)
-# (to run this in CI, add it to .github/workflows/ci.yml via the GitHub web UI —
-#  automation can't push workflow file changes without the `workflows` permission)
 python3 test_price_stats.py --case 3     # Lowest price test
 ```
 

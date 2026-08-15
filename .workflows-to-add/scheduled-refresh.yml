@@ -1,0 +1,82 @@
+name: Scheduled price refresh
+
+# Wakes the (possibly hibernating) web service and triggers one scrape cycle at
+# the five schedule times — 03:00, 08:00, 14:00, 17:00, 21:00 IST.
+# IST is UTC+5:30, so those are 21:30, 02:30, 08:30, 11:30, 15:30 UTC.
+#
+# Setup (Settings → Secrets and variables → Actions):
+#   variable APP_URL    = https://<your-app>.onrender.com
+#   secret   CRON_TOKEN = same value as the CRON_TOKEN env var on the server
+#
+# Note: GitHub's cron is best-effort and may lag by several minutes. The app
+# dedupes cycles within MINUTES_BETWEEN_CYCLES, so late/extra runs are harmless.
+
+on:
+  schedule:
+    - cron: "30 21,2,8,11,15 * * *"
+  workflow_dispatch:
+
+# Never let two pings overlap.
+concurrency:
+  group: scheduled-refresh
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger scrape cycle
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APP_URL:-}" ]; then
+            echo "::error::Repository variable APP_URL is not set (e.g. https://your-app.onrender.com)"
+            exit 1
+          fi
+
+          base="${APP_URL%/}"
+          url="$base/cron/refresh"
+          if [ -n "${CRON_TOKEN:-}" ]; then
+            url="$url?token=$CRON_TOKEN"
+          fi
+
+          # A hibernating instance can take ~1 min to cold start, and the first
+          # request may time out at the edge. Retry a few times before failing.
+          for attempt in 1 2 3 4 5; do
+            echo "Attempt $attempt — pinging /cron/refresh"
+            code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' \
+                        --max-time 120 --retry 0 "$url" || echo "000")
+            echo "HTTP $code"
+            sed -e "s|${CRON_TOKEN:-__none__}|***|g" /tmp/body.txt || true
+            echo
+
+            case "$code" in
+              202) echo "✅ Scrape cycle started"; exit 0 ;;
+              200) echo "✅ Skipped (a recent cycle already covered this slot)"; exit 0 ;;
+              401) echo "::error::Unauthorized — CRON_TOKEN does not match the server"; exit 1 ;;
+            esac
+
+            echo "Retrying in 30s (service may still be waking up)..."
+            sleep 30
+          done
+
+          echo "::error::Could not trigger a scrape cycle after 5 attempts"
+          exit 1
+
+      - name: Report scheduler status
+        if: always()
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          set -uo pipefail
+          [ -z "${APP_URL:-}" ] && exit 0
+          echo "### Scheduler status" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          curl -sS --max-time 60 "${APP_URL%/}/scheduler/status" \
+            >> "$GITHUB_STEP_SUMMARY" 2>&1 || echo "(unavailable)" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
